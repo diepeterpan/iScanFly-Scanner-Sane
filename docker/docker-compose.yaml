@@ -5,10 +5,20 @@ services:
       dockerfile: docker/Dockerfile
     image: iscanfly-airsane:latest
     container_name: iscanfly-airsane
+    privileged: true
     network_mode: host
     restart: unless-stopped
+    volumes:
+      - /dev/bus/usb:/dev/bus/usb
     environment:
       - TZ=Africa/Johannesburg
+      # Wi-Fi Client Configuration for USB RT5370 Adapter
+      - WIFI_ENABLED=true
+      - WIFI_SSID=iScanAir
+      - WIFI_PASSWORD=your_wifi_password_here
+      - WIFI_INTERFACE=                     # Leave empty for auto-detection (e.g. wlan0, wlx...)
+      - WIFI_SCAN_INTERVAL=5                # Continuous scan & reconnect interval in seconds
+      # Scanner & AirSane Configuration
       - SCANNER_IP=192.168.18.33
       - MDNS_ANNOUNCE=true
       - AIRSANE_DEBUG=true

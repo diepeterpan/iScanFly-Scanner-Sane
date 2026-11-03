@@ -120,7 +120,7 @@ docker compose up -d
 ```
 
 ### Configuration (`docker/docker-compose.yaml`)
-You can configure your scanner IP and Bonjour parameters directly in the compose file or `.env`:
+You can configure your scanner IP, Wi-Fi parameters, and Bonjour parameters directly in the compose file or `.env`:
 
 ```yaml
 services:
@@ -130,10 +130,20 @@ services:
       dockerfile: docker/Dockerfile
     image: iscanfly-airsane:latest
     container_name: iscanfly-airsane
+    privileged: true
     network_mode: host
     restart: unless-stopped
+    volumes:
+      - /dev/bus/usb:/dev/bus/usb          # Passthrough for USB RT5370 Wi-Fi adapter
     environment:
       - TZ=Africa/Johannesburg
+      # Wireless Client Configuration (USB RT5370)
+      - WIFI_ENABLED=true                  # Enable automatic Wi-Fi connection
+      - WIFI_SSID=iScanAir                 # Scanner AP SSID
+      - WIFI_PASSWORD=secret               # WPA/WPA2-PSK password (or empty if open AP)
+      - WIFI_INTERFACE=                    # Auto-detected (or explicit e.g. wlan0)
+      - WIFI_SCAN_INTERVAL=5               # Reconnection/scan interval in seconds
+      # Scanner & AirSane Settings
       - SCANNER_IP=192.168.18.33          # IP address of the iScanFly scanner
       - MDNS_ANNOUNCE=true                # Announce via mDNS (Bonjour / Avahi)
       - AIRSANE_LISTEN_PORT=8090          # Port for AirSane Web & eSCL interface
@@ -142,14 +152,19 @@ services:
       - AVAHI_DOMAIN=local
 ```
 
-> **Note on `network_mode: host`**: Host networking is necessary for multicast DNS (`mDNS` / Bonjour) announcements to reach devices across your home network.
+### USB RT5370 Wi-Fi Client Features
+When `WIFI_ENABLED=true` is set:
+- **Automatic Interface Discovery**: Dynamically detects the RT5370 interface (`wlan0`, `wlx...`) and unblocks `rfkill`.
+- **Protected Routing**: The container requests a DHCP lease without installing a default gateway (`0.0.0.0/0`), binding only the local scanner subnet (`192.168.18.0/24`) to the Wi-Fi card. This ensures your host machine's internet and primary network routes are never interrupted.
+- **Continuous 5-Second Loop**: If the scanner AP goes out of range or drops association, the background manager continuously scans and attempts reconnection every 5 seconds without burning unnecessary CPU cycles when connected.
 
 ### Entrypoint Behavior (`docker/entrypoint.sh`)
 When the container boots, [`docker/entrypoint.sh`](file:///home/andre/Development/iScanFly-Scanner/docker/entrypoint.sh):
 1. Configures `/etc/sane.d/iscanfly.conf` with the scanner's IP (`SCANNER_IP`).
 2. Starts the system D-Bus and Avahi daemons for zero-config mDNS discovery.
-3. Tests backend connectivity with `scanimage -L`.
-4. Executes `airsaned` on port `8090` in the foreground.
+3. Launches the background RT5370 Wi-Fi connector if `WIFI_ENABLED=true`.
+4. Tests backend connectivity with `scanimage -L`.
+5. Executes `airsaned` on port `8090` in the foreground.
 
 ---
 

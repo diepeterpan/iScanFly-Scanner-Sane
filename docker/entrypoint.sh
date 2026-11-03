@@ -41,8 +41,19 @@ if [ "$mdns_announce" = "true" ]; then
     sleep 1
 fi
 
+# 4. Start Wi-Fi connector in background if enabled
+wifi_pid=
+if [ "${WIFI_ENABLED:-false}" = "true" ]; then
+    echo "[entrypoint] Launching RT5370 Wi-Fi Client manager..."
+    /usr/local/bin/wifi-connector.sh &
+    wifi_pid=$!
+fi
+
 cleanup() {
     echo "[entrypoint] Caught signal, shutting down..."
+    if [ -n "$wifi_pid" ]; then
+        kill -TERM "$wifi_pid" 2>/dev/null || true
+    fi
     if [ -f /run/avahi-daemon/pid ]; then
         kill -TERM "$(cat /run/avahi-daemon/pid)" 2>/dev/null || true
     fi

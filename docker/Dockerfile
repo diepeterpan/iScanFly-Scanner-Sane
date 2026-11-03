@@ -27,7 +27,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
     ca-certificates curl \
     libjpeg62-turbo libusb-1.0-0 \
     sane-utils libsane1 libsane-common sane-airscan avahi-daemon dbus \
-    bash \
+    bash iproute2 iw wpasupplicant isc-dhcp-client rfkill \
     build-essential cmake git g++ pkg-config \
     libsane-dev libjpeg-dev libpng-dev libavahi-client-dev libusb-1.0-0-dev \
     && rm -rf /var/lib/apt/lists/*
@@ -57,7 +57,8 @@ COPY --from=driver-builder /build/dist/iscanfly.conf /etc/sane.d/iscanfly.conf
 
 EXPOSE 8090
 
+COPY docker/wifi-connector.sh /usr/local/bin/wifi-connector.sh
 COPY docker/entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+RUN chmod +x /usr/local/bin/wifi-connector.sh /entrypoint.sh
 
 ENTRYPOINT ["/entrypoint.sh"]
