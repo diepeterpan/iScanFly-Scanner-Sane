@@ -12,6 +12,7 @@ services:
       - /dev/rfkill:/dev/rfkill
     volumes:
       - /dev/bus/usb:/dev/bus/usb
+      - /lib/firmware:/lib/firmware:ro
     cap_add:
       - NET_ADMIN
       - NET_RAW
