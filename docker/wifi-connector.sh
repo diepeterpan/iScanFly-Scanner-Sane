@@ -118,13 +118,33 @@ cat << EOF >> "$WPA_CONF"
 }
 EOF
 
-# Function to start or restart wpa_supplicant
-start_wpa_supplicant() {
+# Function to clean interface and release stale kernel packet matching filters
+clean_interface() {
+    log "Cleaning interface $IFACE and purging stale driver filters..."
     if [[ -f "$WPA_PID_FILE" ]] && kill -0 "$(cat "$WPA_PID_FILE")" 2>/dev/null; then
         kill -TERM "$(cat "$WPA_PID_FILE")" 2>/dev/null || true
-        sleep 1
     fi
-    rm -f /run/wpa_supplicant/"$IFACE"
+    if [[ -f "$DHCP_PID_FILE" ]] && kill -0 "$(cat "$DHCP_PID_FILE")" 2>/dev/null; then
+        kill -TERM "$(cat "$DHCP_PID_FILE")" 2>/dev/null || true
+    fi
+    pkill -f "dhclient.*$IFACE" 2>/dev/null || true
+    rm -f /run/wpa_supplicant/"$IFACE" "$WPA_PID_FILE" "$DHCP_PID_FILE"
+
+    # Flush all stale IPv4/IPv6 addresses
+    ip -4 addr flush dev "$IFACE" 2>/dev/null || true
+    ip -6 addr flush dev "$IFACE" 2>/dev/null || true
+
+    # Cycling interface down and up purges mac80211 Netlink packet match filters
+    ip link set "$IFACE" down 2>/dev/null || true
+    sleep 1
+    unblock_rfkill
+    ip link set "$IFACE" up 2>/dev/null || true
+    sleep 1
+}
+
+# Function to start or restart wpa_supplicant
+start_wpa_supplicant() {
+    clean_interface
     log "Starting wpa_supplicant on $IFACE for SSID '$WIFI_SSID' (drivers: nl80211,wext)..."
     wpa_supplicant -B -Dnl80211,wext -i "$IFACE" -c "$WPA_CONF" -P "$WPA_PID_FILE"
 }
@@ -136,6 +156,8 @@ HAS_DHCP=0
 
 request_dhcp() {
     log "Associated with '$WIFI_SSID'. Requesting DHCP without default gateway..."
+    ip -4 addr flush dev "$IFACE" 2>/dev/null || true
+
     # Using dhclient with custom options, or dhcpcd -G (no default gateway), or udhcpc
     if command -v dhcpcd >/dev/null 2>&1; then
         # -G / --nogateway prevents setting default route
@@ -152,9 +174,24 @@ request_dhcp() {
         cat << 'EOF_DH' > "$dhclient_conf"
 request subnet-mask, broadcast-address, time-offset, host-name;
 EOF_DH
+        pkill -f "dhclient.*$IFACE" 2>/dev/null || true
         dhclient -cf "$dhclient_conf" -1 -v "$IFACE" 2>&1 | while read -r line; do log "[dhclient] $line"; done || true
         HAS_DHCP=1
     fi
+
+    # Probe scanner at 192.168.18.33 to warm up ARP table
+    log "Verifying scanner connectivity (192.168.18.33)..."
+    python3 -c "
+import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.settimeout(2)
+try:
+    s.connect(('192.168.18.33', 23))
+    print('[wifi-connector] Scanner port 23 reached successfully!')
+    s.close()
+except Exception as e:
+    print(f'[wifi-connector] Notice: initial probe to 192.168.18.33:23: {e}')
+" 2>&1 | while read -r line; do log "$line"; done || true
 }
 
 # 5. Continuous Monitor and Scan Loop (WIFI_SCAN_INTERVAL seconds)
@@ -173,13 +210,9 @@ while true; do
         if [[ "$LAST_REPORTED_STATE" != "CONNECTED" ]]; then
             log "Successfully connected to '$WIFI_SSID'."
             LAST_REPORTED_STATE="CONNECTED"
-        fi
-        DISCONNECTED_SECONDS=0
-        # Check if interface has an IPv4 address assigned
-        IP_ASSIGNED=$(ip -4 addr show dev "$IFACE" | grep -o 'inet [0-9.]*' | awk '{print $2}' || true)
-        if [[ -z "$IP_ASSIGNED" ]]; then
             request_dhcp
         fi
+        DISCONNECTED_SECONDS=0
     else
         CURRENT_STATE_DESC="${WPA_STATE:-DISCONNECTED}"
         DISCONNECTED_SECONDS=$((DISCONNECTED_SECONDS + WIFI_SCAN_INTERVAL))
