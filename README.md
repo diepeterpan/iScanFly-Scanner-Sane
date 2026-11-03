@@ -156,7 +156,7 @@ services:
 
 ### USB RT5370 Wi-Fi Client Features & Host Prerequisites
 
-#### ⚠️ Host Prerequisite: Wireless Firmware
+#### ⚠️ Host Prerequisite 1: Wireless Firmware
 Because the Linux kernel driver (`rt2800usb`) executes in the **host kernel**, the host system must have the Ralink / MediaTek firmware package installed. The container does not and cannot inject kernel firmware into the host kernel.
 
 Install the firmware package on your host Linux system using your package manager (ensure `non-free-firmware` / `non-free` repositories are enabled):
@@ -170,6 +170,28 @@ sudo apt update && sudo apt install -y firmware-misc-nonfree firmware-mediatek
 
 # Fedora / RHEL:
 # sudo dnf install linux-firmware
+```
+
+#### ⚠️ Host Prerequisite 2: Unmanage Wi-Fi Dongle in Host NetworkManager
+If your host runs NetworkManager (`systemctl status NetworkManager`), NetworkManager and the host's background `wpa_supplicant` will attempt to control the RT5370 USB Wi-Fi dongle at the same time as the container. This causes radio conflicts and kernel filter collision errors:
+```text
+nl80211: kernel reports: Match already configured
+```
+
+To give the container exclusive, stable control over the dongle, configure host NetworkManager to ignore it:
+
+```bash
+# Create NetworkManager unmanaged override for USB wireless interfaces:
+sudo tee /etc/NetworkManager/conf.d/99-unmanage-iscanfly.conf << 'EOF'
+[keyfile]
+unmanaged-devices=interface-name:wlx*
+EOF
+
+# Reload NetworkManager configuration on the host:
+sudo systemctl reload NetworkManager
+
+# Verify the interface is unmanaged:
+nmcli dev status
 ```
 
 #### Wi-Fi Connector Capabilities
@@ -197,7 +219,7 @@ scanimage -L
 ```
 *Expected Output:*
 ```text
-device `iscanfly:net:192.168.18.33:23' is a Mustek iScan Air / S400W sheetfed scanner
+device `iscanfly:net:192.168.18.33:23' is a Mustek iScan Air / S400W document feeder
 ```
 
 ### Inspect Available Options

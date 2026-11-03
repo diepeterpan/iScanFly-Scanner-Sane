@@ -1,6 +1,7 @@
 // clang-format off
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
@@ -687,47 +688,167 @@ static SANE_Status decode_and_process_jpeg(IScanFly_Handle *h) {
     return SANE_STATUS_NO_MEM;
   }
 
-  JSAMPROW row_pointer[1];
-  row_pointer[0] = (JSAMPROW)malloc(width * 3);
-  if (!row_pointer[0]) {
-    free(h->raster_data);
-    h->raster_data = NULL;
+  if (is_lineart) {
+    /* For Lineart: read the entire image as grayscale first, then apply
+     * adaptive Bradley thresholding (or user-specified manual threshold) */
+    unsigned char *gray_buf = (unsigned char *)malloc(width * height);
+    if (!gray_buf) {
+      free(h->raster_data);
+      h->raster_data = NULL;
+      jpeg_finish_decompress(&cinfo);
+      jpeg_destroy_decompress(&cinfo);
+      return SANE_STATUS_NO_MEM;
+    }
+
+    JSAMPROW row_pointer[1];
+    row_pointer[0] = (JSAMPROW)malloc(width * 3);
+    if (!row_pointer[0]) {
+      free(gray_buf);
+      free(h->raster_data);
+      h->raster_data = NULL;
+      jpeg_finish_decompress(&cinfo);
+      jpeg_destroy_decompress(&cinfo);
+      return SANE_STATUS_NO_MEM;
+    }
+
+    size_t line = 0;
+    while (cinfo.output_scanline < cinfo.output_height) {
+      jpeg_read_scanlines(&cinfo, row_pointer, 1);
+      unsigned char *row_gray = gray_buf + (line * width);
+      for (int x = 0; x < width; x++) {
+        unsigned int r = row_pointer[0][x * 3 + 0];
+        unsigned int g = row_pointer[0][x * 3 + 1];
+        unsigned int b = row_pointer[0][x * 3 + 2];
+        row_gray[x] = (unsigned char)((77 * r + 150 * g + 29 * b) >> 8);
+      }
+      line++;
+    }
+    free(row_pointer[0]);
     jpeg_finish_decompress(&cinfo);
     jpeg_destroy_decompress(&cinfo);
-    return SANE_STATUS_NO_MEM;
-  }
 
-  size_t line = 0;
-  while (cinfo.output_scanline < cinfo.output_height) {
-    jpeg_read_scanlines(&cinfo, row_pointer, 1);
-    unsigned char *dst = h->raster_data + (line * out_bytes_per_line);
-
-    if (is_color) {
-      memcpy(dst, row_pointer[0], width * 3);
-    } else if (is_lineart) {
-      memset(dst, 0, out_bytes_per_line);
-      for (int x = 0; x < width; x++) {
-        unsigned char r = row_pointer[0][x * 3 + 0];
-        unsigned char g = row_pointer[0][x * 3 + 1];
-        unsigned char b = row_pointer[0][x * 3 + 2];
-        unsigned int y = (77 * r + 150 * g + 29 * b) >> 8;
-        if (y >= (unsigned int)threshold) {
-          dst[x / 8] |= (1 << (7 - (x % 8)));
+    /* Binarization:
+     * If threshold != ISCANFLY_DEFAULT_THRESHOLD (128), user explicitly set it.
+     * Otherwise, use adaptive Bradley-Roth local thresholding.
+     */
+    if (threshold != ISCANFLY_DEFAULT_THRESHOLD) {
+      /* Fixed manual threshold (SANE 1-bit: 1=Black/ink, 0=White/paper) */
+      for (int y = 0; y < height; y++) {
+        unsigned char *dst = h->raster_data + (y * out_bytes_per_line);
+        const unsigned char *src = gray_buf + (y * width);
+        memset(dst, 0, out_bytes_per_line);
+        for (int x = 0; x < width; x++) {
+          if (src[x] < (unsigned char)threshold) {
+            dst[x / 8] |= (1 << (7 - (x % 8)));
+          }
         }
       }
     } else {
-      for (int x = 0; x < width; x++) {
-        unsigned char r = row_pointer[0][x * 3 + 0];
-        unsigned char g = row_pointer[0][x * 3 + 1];
-        unsigned char b = row_pointer[0][x * 3 + 2];
-        dst[x] = (unsigned char)((77 * r + 150 * g + 29 * b) >> 8);
+      /* Bradley-Roth adaptive thresholding using an integral image.
+       * Window size S = width / 16, sensitivity T = 12% darker than local mean.
+       */
+      int S = width / 16;
+      if (S < 8)
+        S = 8;
+      const int T = 12;
+
+      /* Allocate integral image: (width + 1) * (height + 1) of uint64_t */
+      uint64_t *integral =
+          (uint64_t *)calloc((width + 1) * (height + 1), sizeof(uint64_t));
+      if (integral) {
+        for (int y = 0; y < height; y++) {
+          uint64_t row_sum = 0;
+          for (int x = 0; x < width; x++) {
+            row_sum += gray_buf[y * width + x];
+            integral[(y + 1) * (width + 1) + (x + 1)] =
+                integral[y * (width + 1) + (x + 1)] + row_sum;
+          }
+        }
+
+        for (int y = 0; y < height; y++) {
+          unsigned char *dst = h->raster_data + (y * out_bytes_per_line);
+          const unsigned char *src = gray_buf + (y * width);
+          memset(dst, 0, out_bytes_per_line);
+
+          int y1 = y - S;
+          if (y1 < 0)
+            y1 = 0;
+          int y2 = y + S;
+          if (y2 >= height)
+            y2 = height - 1;
+
+          for (int x = 0; x < width; x++) {
+            int x1 = x - S;
+            if (x1 < 0)
+              x1 = 0;
+            int x2 = x + S;
+            if (x2 >= width)
+              x2 = width - 1;
+
+            uint64_t count = (uint64_t)(x2 - x1 + 1) * (y2 - y1 + 1);
+            uint64_t sum = integral[(y2 + 1) * (width + 1) + (x2 + 1)] -
+                           integral[y1 * (width + 1) + (x2 + 1)] -
+                           integral[(y2 + 1) * (width + 1) + x1] +
+                           integral[y1 * (width + 1) + x1];
+
+            uint64_t val = src[x];
+            /* If pixel is T% darker than surrounding local neighborhood, it is
+             * ink/black */
+            if (val * 100 * count < sum * (100 - T)) {
+              dst[x / 8] |= (1 << (7 - (x % 8)));
+            }
+          }
+        }
+        free(integral);
+      } else {
+        /* Fallback to simple mean if memory allocation fails */
+        for (int y = 0; y < height; y++) {
+          unsigned char *dst = h->raster_data + (y * out_bytes_per_line);
+          const unsigned char *src = gray_buf + (y * width);
+          memset(dst, 0, out_bytes_per_line);
+          for (int x = 0; x < width; x++) {
+            if (src[x] < 128) {
+              dst[x / 8] |= (1 << (7 - (x % 8)));
+            }
+          }
+        }
       }
     }
-    line++;
-  }
+    free(gray_buf);
+  } else {
+    /* Color or 8-bit Grayscale */
+    JSAMPROW row_pointer[1];
+    row_pointer[0] = (JSAMPROW)malloc(width * 3);
+    if (!row_pointer[0]) {
+      free(h->raster_data);
+      h->raster_data = NULL;
+      jpeg_finish_decompress(&cinfo);
+      jpeg_destroy_decompress(&cinfo);
+      return SANE_STATUS_NO_MEM;
+    }
 
-  free(row_pointer[0]);
-  jpeg_finish_decompress(&cinfo);
+    size_t line = 0;
+    while (cinfo.output_scanline < cinfo.output_height) {
+      jpeg_read_scanlines(&cinfo, row_pointer, 1);
+      unsigned char *dst = h->raster_data + (line * out_bytes_per_line);
+
+      if (is_color) {
+        memcpy(dst, row_pointer[0], width * 3);
+      } else {
+        for (int x = 0; x < width; x++) {
+          unsigned int r = row_pointer[0][x * 3 + 0];
+          unsigned int g = row_pointer[0][x * 3 + 1];
+          unsigned int b = row_pointer[0][x * 3 + 2];
+          dst[x] = (unsigned char)((77 * r + 150 * g + 29 * b) >> 8);
+        }
+      }
+      line++;
+    }
+
+    free(row_pointer[0]);
+    jpeg_finish_decompress(&cinfo);
+    jpeg_destroy_decompress(&cinfo);
+  }
   jpeg_destroy_decompress(&cinfo);
 
   h->raster_size = total_raster_bytes;
