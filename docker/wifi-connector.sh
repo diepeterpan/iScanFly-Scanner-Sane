@@ -21,10 +21,13 @@ log() {
 }
 
 # 1. Unblock any software rfkill blocks
-if command -v rfkill >/dev/null 2>&1; then
-    rfkill unblock wifi 2>/dev/null || true
-    rfkill unblock all 2>/dev/null || true
-fi
+unblock_rfkill() {
+    if command -v rfkill >/dev/null 2>&1; then
+        rfkill unblock wifi 2>/dev/null || true
+        rfkill unblock all 2>/dev/null || true
+    fi
+}
+unblock_rfkill
 
 # 2. Discover wireless interface if not explicitly defined
 find_interface() {
@@ -78,8 +81,14 @@ done
 
 log "Using wireless interface: $IFACE"
 
-# Bring interface UP
-ip link set "$IFACE" up || true
+# Unblock radio and bring interface UP
+unblock_rfkill
+if ! ip link set "$IFACE" up; then
+    log "Warning: 'ip link set $IFACE up' failed. Retrying after rfkill unblock..."
+    unblock_rfkill
+    sleep 1
+    ip link set "$IFACE" up || log "Notice: could not set interface UP directly, wpa_supplicant will attempt driver initialization."
+fi
 
 # 3. Generate wpa_supplicant.conf
 mkdir -p /run/wpa_supplicant
@@ -107,10 +116,10 @@ cat << EOF >> "$WPA_CONF"
 }
 EOF
 
-# 4. Start wpa_supplicant
+# 4. Start wpa_supplicant with nl80211 and wext fallback
 rm -f /run/wpa_supplicant/"$IFACE"
-log "Starting wpa_supplicant on $IFACE for SSID '$WIFI_SSID'..."
-wpa_supplicant -B -i "$IFACE" -c "$WPA_CONF" -P "$WPA_PID_FILE"
+log "Starting wpa_supplicant on $IFACE for SSID '$WIFI_SSID' (drivers: nl80211,wext)..."
+wpa_supplicant -B -Dnl80211,wext -i "$IFACE" -c "$WPA_CONF" -P "$WPA_PID_FILE"
 
 HAS_DHCP=0
 

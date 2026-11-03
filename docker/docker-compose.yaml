@@ -8,8 +8,13 @@ services:
     privileged: true
     network_mode: host
     restart: unless-stopped
+    devices:
+      - /dev/rfkill:/dev/rfkill
     volumes:
       - /dev/bus/usb:/dev/bus/usb
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
     environment:
       - TZ=Africa/Johannesburg
       # Wi-Fi Client Configuration for USB RT5370 Adapter
