@@ -23,10 +23,13 @@ services:
       - WIFI_PASSWORD=your_wifi_password_here
       - WIFI_INTERFACE=                     # Leave empty for auto-detection (e.g. wlan0, wlx...)
       - WIFI_SCAN_INTERVAL=5                # Continuous scan & reconnect interval in seconds
+      - WIFI_RESET_TIMEOUT=45               # Timeout in seconds to reset interface if disconnected
+      - WIFI_VERBOSE=false                  # Set to true to log reconnection attempts on every interval
       # Scanner & AirSane Configuration
       - SCANNER_IP=192.168.18.33
       - MDNS_ANNOUNCE=true
-      - AIRSANE_DEBUG=true
+      - AIRSANE_DEBUG=false                 # Set to true for verbose airsaned security & debugging
+      - AIRSANE_ACCESS_LOG=                 # Set to '-' to log HTTP access requests (e.g. /eSCL/ScannerStatus)
       - AIRSANE_LISTEN_PORT=8090
       - ANNOUNCE_SECURE=false
       - ANNOUNCE_BASE_URL=

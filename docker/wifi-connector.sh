@@ -11,6 +11,8 @@ WIFI_SSID="${WIFI_SSID:-iScanAir}"
 WIFI_PASSWORD="${WIFI_PASSWORD:-}"
 WIFI_INTERFACE="${WIFI_INTERFACE:-}"
 WIFI_SCAN_INTERVAL="${WIFI_SCAN_INTERVAL:-5}"
+WIFI_VERBOSE="${WIFI_VERBOSE:-false}"
+WIFI_RESET_TIMEOUT="${WIFI_RESET_TIMEOUT:-45}"
 
 WPA_CONF="/run/wpa_supplicant.conf"
 WPA_PID_FILE="/run/wpa_supplicant.pid"
@@ -116,10 +118,19 @@ cat << EOF >> "$WPA_CONF"
 }
 EOF
 
-# 4. Start wpa_supplicant with nl80211 and wext fallback
-rm -f /run/wpa_supplicant/"$IFACE"
-log "Starting wpa_supplicant on $IFACE for SSID '$WIFI_SSID' (drivers: nl80211,wext)..."
-wpa_supplicant -B -Dnl80211,wext -i "$IFACE" -c "$WPA_CONF" -P "$WPA_PID_FILE"
+# Function to start or restart wpa_supplicant
+start_wpa_supplicant() {
+    if [[ -f "$WPA_PID_FILE" ]] && kill -0 "$(cat "$WPA_PID_FILE")" 2>/dev/null; then
+        kill -TERM "$(cat "$WPA_PID_FILE")" 2>/dev/null || true
+        sleep 1
+    fi
+    rm -f /run/wpa_supplicant/"$IFACE"
+    log "Starting wpa_supplicant on $IFACE for SSID '$WIFI_SSID' (drivers: nl80211,wext)..."
+    wpa_supplicant -B -Dnl80211,wext -i "$IFACE" -c "$WPA_CONF" -P "$WPA_PID_FILE"
+}
+
+# 4. Start wpa_supplicant
+start_wpa_supplicant
 
 HAS_DHCP=0
 
@@ -147,7 +158,10 @@ EOF_DH
 }
 
 # 5. Continuous Monitor and Scan Loop (WIFI_SCAN_INTERVAL seconds)
-log "Starting continuous association monitoring loop (interval: ${WIFI_SCAN_INTERVAL}s)..."
+log "Starting continuous association monitoring loop (interval: ${WIFI_SCAN_INTERVAL}s, reset timeout: ${WIFI_RESET_TIMEOUT}s)..."
+
+LAST_REPORTED_STATE=""
+DISCONNECTED_SECONDS=0
 
 while true; do
     # Check current wpa_supplicant status
@@ -156,16 +170,45 @@ while true; do
     CURRENT_SSID=$(echo "$STATUS_OUT" | awk -F= '$1=="ssid"{print $2}')
 
     if [[ "$WPA_STATE" == "COMPLETED" && "$CURRENT_SSID" == "$WIFI_SSID" ]]; then
+        if [[ "$LAST_REPORTED_STATE" != "CONNECTED" ]]; then
+            log "Successfully connected to '$WIFI_SSID'."
+            LAST_REPORTED_STATE="CONNECTED"
+        fi
+        DISCONNECTED_SECONDS=0
         # Check if interface has an IPv4 address assigned
         IP_ASSIGNED=$(ip -4 addr show dev "$IFACE" | grep -o 'inet [0-9.]*' | awk '{print $2}' || true)
         if [[ -z "$IP_ASSIGNED" ]]; then
             request_dhcp
         fi
     else
-        log "Not connected to '$WIFI_SSID' (state: ${WPA_STATE:-DISCONNECTED}). Triggering scan & reconnect..."
+        CURRENT_STATE_DESC="${WPA_STATE:-DISCONNECTED}"
+        DISCONNECTED_SECONDS=$((DISCONNECTED_SECONDS + WIFI_SCAN_INTERVAL))
+
+        # Check if we exceeded the hard reset timeout threshold
+        if [[ "$DISCONNECTED_SECONDS" -ge "$WIFI_RESET_TIMEOUT" ]]; then
+            log "WARNING: Not connected to '$WIFI_SSID' for ${DISCONNECTED_SECONDS}s (state: $CURRENT_STATE_DESC). Resetting radio interface and restarting wpa_supplicant..."
+            ip link set "$IFACE" down || true
+            sleep 1
+            unblock_rfkill
+            ip link set "$IFACE" up || true
+            sleep 1
+            start_wpa_supplicant
+            DISCONNECTED_SECONDS=0
+            LAST_REPORTED_STATE="RESET"
+        else
+            if [[ "$LAST_REPORTED_STATE" != "$CURRENT_STATE_DESC" || "$WIFI_VERBOSE" == "true" ]]; then
+                log "Not connected to '$WIFI_SSID' (state: $CURRENT_STATE_DESC, disconnected: ${DISCONNECTED_SECONDS}s). Waiting for scanner AP..."
+                LAST_REPORTED_STATE="$CURRENT_STATE_DESC"
+            fi
+            # Allow wpa_supplicant's own scan state machine to run without constant abortive re-triggers.
+            # Only trigger a soft scan if completely idle/disconnected for over 15s.
+            if [[ "$CURRENT_STATE_DESC" == "DISCONNECTED" || "$CURRENT_STATE_DESC" == "INACTIVE" ]]; then
+                if [[ "$DISCONNECTED_SECONDS" -ge 15 ]]; then
+                    wpa_cli -i "$IFACE" scan >/dev/null 2>&1 || true
+                fi
+            fi
+        fi
         HAS_DHCP=0
-        wpa_cli -i "$IFACE" scan >/dev/null 2>&1 || true
-        wpa_cli -i "$IFACE" reconnect >/dev/null 2>&1 || true
     fi
 
     sleep "$WIFI_SCAN_INTERVAL"

@@ -6,7 +6,8 @@ set -euo pipefail
 # ==============================================================================
 
 mdns_announce="${MDNS_ANNOUNCE:-true}"
-airsane_debug="${AIRSANE_DEBUG:-true}"
+airsane_debug="${AIRSANE_DEBUG:-false}"
+airsane_access_log="${AIRSANE_ACCESS_LOG:-}"
 airsane_listen_port="${AIRSANE_LISTEN_PORT:-8090}"
 announce_secure="${ANNOUNCE_SECURE:-false}"
 announce_base_url="${ANNOUNCE_BASE_URL:-}"
@@ -68,10 +69,16 @@ scanimage -L || true
 echo "[entrypoint] Executing airsaned on port $airsane_listen_port (debug=$airsane_debug)..."
 
 # Execute airsaned directly as user saned
-exec runuser -u saned -- /usr/local/bin/airsaned \
-    "--listen-port=$airsane_listen_port" \
-    "--mdns-announce=$mdns_announce" \
-    "--announce-secure=$announce_secure" \
-    "--announce-base-url=$announce_base_url" \
-    --access-log=- \
+airsane_args=(
+    "--listen-port=$airsane_listen_port"
+    "--mdns-announce=$mdns_announce"
+    "--announce-secure=$announce_secure"
+    "--announce-base-url=$announce_base_url"
     "--debug=$airsane_debug"
+)
+
+if [ -n "$airsane_access_log" ]; then
+    airsane_args+=("--access-log=$airsane_access_log")
+fi
+
+exec runuser -u saned -- /usr/local/bin/airsaned "${airsane_args[@]}"

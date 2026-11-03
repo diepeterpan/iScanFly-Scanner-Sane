@@ -143,11 +143,13 @@ services:
       - WIFI_PASSWORD=secret               # WPA/WPA2-PSK password (or empty if open AP)
       - WIFI_INTERFACE=                    # Auto-detected (or explicit e.g. wlan0)
       - WIFI_SCAN_INTERVAL=5               # Reconnection/scan interval in seconds
+      - WIFI_VERBOSE=false                 # Set to true to log reconnects on every check interval
       # Scanner & AirSane Settings
       - SCANNER_IP=192.168.18.33          # IP address of the iScanFly scanner
       - MDNS_ANNOUNCE=true                # Announce via mDNS (Bonjour / Avahi)
       - AIRSANE_LISTEN_PORT=8090          # Port for AirSane Web & eSCL interface
-      - AIRSANE_DEBUG=true                # Log AirSane access and protocol events
+      - AIRSANE_DEBUG=false               # Log AirSane internal security/debug events
+      - AIRSANE_ACCESS_LOG=               # Set to '-' to log HTTP access requests (e.g. /eSCL/ScannerStatus)
       - AVAHI_HOST_NAME=iscanfly          # Advertised Bonjour hostname
       - AVAHI_DOMAIN=local
 ```
