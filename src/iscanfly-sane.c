@@ -6,6 +6,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <setjmp.h>
+#include <math.h>
 #include <jpeglib.h>
 // clang-format on
 
@@ -44,6 +45,8 @@ static SANE_Int num_devices = 0;
 static IScanFly_Device *device_list = NULL;
 static const SANE_Device **sane_dev_list = NULL;
 static SANE_Auth_Callback auth_callback = NULL;
+static int default_autocrop = 1;
+static int default_deskew = 1;
 
 /* Logging helper */
 static void iscanfly_log(int level, const char *msg) {
@@ -155,6 +158,32 @@ static void load_config(void) {
            (*end == ' ' || *end == '\t' || *end == '\n' || *end == '\r')) {
       *end = '\0';
       end--;
+    }
+
+    if (strncasecmp(p, "autocrop", 8) == 0) {
+      char *val = p + 8;
+      while (*val == ' ' || *val == '\t' || *val == '=')
+        val++;
+      if (strcasecmp(val, "no") == 0 || strcasecmp(val, "false") == 0 ||
+          strcmp(val, "0") == 0) {
+        default_autocrop = 0;
+      } else {
+        default_autocrop = 1;
+      }
+      continue;
+    }
+
+    if (strncasecmp(p, "deskew", 6) == 0) {
+      char *val = p + 6;
+      while (*val == ' ' || *val == '\t' || *val == '=')
+        val++;
+      if (strcasecmp(val, "no") == 0 || strcasecmp(val, "false") == 0 ||
+          strcmp(val, "0") == 0) {
+        default_deskew = 0;
+      } else {
+        default_deskew = 1;
+      }
+      continue;
     }
 
     char host[200] = {0};
@@ -318,6 +347,28 @@ static void init_options(IScanFly_Handle *h) {
   h->opt[OPT_THRESHOLD].constraint_type = SANE_CONSTRAINT_RANGE;
   h->opt[OPT_THRESHOLD].constraint.range = &threshold_range;
 
+  /* OPT_AUTOCROP */
+  h->opt_val[OPT_AUTOCROP] = default_autocrop ? SANE_TRUE : SANE_FALSE;
+  h->opt[OPT_AUTOCROP].name = "autocrop";
+  h->opt[OPT_AUTOCROP].title = SANE_I18N("Auto Crop");
+  h->opt[OPT_AUTOCROP].desc =
+      SANE_I18N("Automatically crop the scanned image to detected page boundary");
+  h->opt[OPT_AUTOCROP].type = SANE_TYPE_BOOL;
+  h->opt[OPT_AUTOCROP].unit = SANE_UNIT_NONE;
+  h->opt[OPT_AUTOCROP].size = sizeof(SANE_Word);
+  h->opt[OPT_AUTOCROP].cap = SANE_CAP_SOFT_SELECT | SANE_CAP_SOFT_DETECT;
+
+  /* OPT_DESKEW */
+  h->opt_val[OPT_DESKEW] = default_deskew ? SANE_TRUE : SANE_FALSE;
+  h->opt[OPT_DESKEW].name = "deskew";
+  h->opt[OPT_DESKEW].title = SANE_I18N("Deskew");
+  h->opt[OPT_DESKEW].desc =
+      SANE_I18N("Automatically rotate and straighten skewed documents");
+  h->opt[OPT_DESKEW].type = SANE_TYPE_BOOL;
+  h->opt[OPT_DESKEW].unit = SANE_UNIT_NONE;
+  h->opt[OPT_DESKEW].size = sizeof(SANE_Word);
+  h->opt[OPT_DESKEW].cap = SANE_CAP_SOFT_SELECT | SANE_CAP_SOFT_DETECT;
+
   /* OPT_PAPER_TIMEOUT */
   h->opt_val[OPT_PAPER_TIMEOUT] = ISCANFLY_DEFAULT_PAPER_TIMEOUT_SEC;
   h->opt[OPT_PAPER_TIMEOUT].name = "paper-wait-timeout";
@@ -476,6 +527,8 @@ SANE_Status sane_iscanfly_control_option(SANE_Handle handle, SANE_Int option,
       break;
     case OPT_RESOLUTION:
     case OPT_THRESHOLD:
+    case OPT_AUTOCROP:
+    case OPT_DESKEW:
     case OPT_PAPER_TIMEOUT:
       *(SANE_Word *)value = h->opt_val[option];
       break;
@@ -545,6 +598,16 @@ SANE_Status sane_iscanfly_control_option(SANE_Handle handle, SANE_Int option,
       if (val > 255)
         val = 255;
       h->opt_val[OPT_THRESHOLD] = val;
+      break;
+    }
+    case OPT_AUTOCROP: {
+      SANE_Word val = *(SANE_Word *)value;
+      h->opt_val[OPT_AUTOCROP] = val ? SANE_TRUE : SANE_FALSE;
+      break;
+    }
+    case OPT_DESKEW: {
+      SANE_Word val = *(SANE_Word *)value;
+      h->opt_val[OPT_DESKEW] = val ? SANE_TRUE : SANE_FALSE;
       break;
     }
     case OPT_PAPER_TIMEOUT: {
@@ -626,7 +689,199 @@ SANE_Status sane_iscanfly_get_parameters(SANE_Handle handle,
   return SANE_STATUS_GOOD;
 }
 
-/* Decode JPEG buffer and process resolution scaling and bit depth conversion */
+/* Fast bilinear interpolation on RGB image:
+ * src: width * height * 3
+ * Evaluates coordinate (fx, fy) and returns RGB into out_rgb.
+ */
+static inline void sample_bilinear_rgb(const unsigned char *src, int width,
+                                       int height, double fx, double fy,
+                                       unsigned char *out_rgb) {
+  int x0 = (int)floor(fx);
+  int y0 = (int)floor(fy);
+  int x1 = x0 + 1;
+  int y1 = y0 + 1;
+
+  if (x0 < 0 || x0 >= width || y0 < 0 || y0 >= height) {
+    out_rgb[0] = 255;
+    out_rgb[1] = 255;
+    out_rgb[2] = 255;
+    return;
+  }
+
+  double dx = fx - x0;
+  double dy = fy - y0;
+
+  if (x1 >= width)
+    x1 = width - 1;
+  if (y1 >= height)
+    y1 = height - 1;
+
+  const unsigned char *p00 = src + (y0 * width + x0) * 3;
+  const unsigned char *p10 = src + (y0 * width + x1) * 3;
+  const unsigned char *p01 = src + (y1 * width + x0) * 3;
+  const unsigned char *p11 = src + (y1 * width + x1) * 3;
+
+  for (int c = 0; c < 3; c++) {
+    double val = (1.0 - dx) * (1.0 - dy) * p00[c] +
+                 dx * (1.0 - dy) * p10[c] +
+                 (1.0 - dx) * dy * p01[c] +
+                 dx * dy * p11[c];
+    if (val < 0.0)
+      val = 0.0;
+    if (val > 255.0)
+      val = 255.0;
+    out_rgb[c] = (unsigned char)(val + 0.5);
+  }
+}
+
+/* Fast deskew & auto-crop:
+ * Analyzes RGB image buffer (*p_rgb, *p_w, *p_h)
+ * Detects paper boundaries against dark feeder backing (~85 vs paper > 150)
+ * Straightens page if deskew is enabled, crops flush to detected edges.
+ */
+static void process_autocrop_and_deskew(unsigned char **p_rgb, int *p_w,
+                                       int *p_h, int enable_crop,
+                                       int enable_deskew) {
+  if (!enable_crop && !enable_deskew)
+    return;
+
+  int w = *p_w;
+  int h = *p_h;
+  const unsigned char *src = *p_rgb;
+
+  /* Step 1: Detect paper edge coordinates across rows.
+   * Feeder backing is dark gray (~70-95), paper is bright (>160).
+   * We sample every 4 rows for speed and robustness.
+   */
+  const int sample_step = 4;
+  int max_samples = (h + sample_step - 1) / sample_step;
+  int *edge_y = (int *)malloc(max_samples * sizeof(int));
+  int *edge_left = (int *)malloc(max_samples * sizeof(int));
+  int *edge_right = (int *)malloc(max_samples * sizeof(int));
+  if (!edge_y || !edge_left || !edge_right) {
+    if (edge_y) free(edge_y);
+    if (edge_left) free(edge_left);
+    if (edge_right) free(edge_right);
+    return;
+  }
+
+  int num_edges = 0;
+  for (int y = 0; y < h; y += sample_step) {
+    int left = -1;
+    int right = -1;
+    const unsigned char *row = src + y * w * 3;
+    for (int x = 0; x < w; x++) {
+      int gray = (77 * row[x * 3] + 150 * row[x * 3 + 1] + 29 * row[x * 3 + 2]) >> 8;
+      if (gray > 140) {
+        if (left == -1)
+          left = x;
+        right = x;
+      }
+    }
+    /* Only count as paper line if detected paper width is at least 60 pixels */
+    if (left != -1 && (right - left) >= 60) {
+      edge_y[num_edges] = y;
+      edge_left[num_edges] = left;
+      edge_right[num_edges] = right;
+      num_edges++;
+    }
+  }
+
+  /* If no paper or virtually whole image matches, nothing to crop */
+  if (num_edges < 10) {
+    free(edge_y);
+    free(edge_left);
+    free(edge_right);
+    return;
+  }
+
+  /* Step 2: Linear regression on left edge to find skew angle */
+  double angle = 0.0;
+  if (enable_deskew && num_edges >= 20) {
+    double sum_y = 0.0, sum_x = 0.0;
+    for (int i = 0; i < num_edges; i++) {
+      sum_y += edge_y[i];
+      sum_x += edge_left[i];
+    }
+    double mean_y = sum_y / num_edges;
+    double mean_x = sum_x / num_edges;
+
+    double num = 0.0, den = 0.0;
+    for (int i = 0; i < num_edges; i++) {
+      double dy = edge_y[i] - mean_y;
+      double dx = edge_left[i] - mean_x;
+      num += dy * dx;
+      den += dy * dy;
+    }
+
+    if (den > 1e-4) {
+      double slope = num / den; /* dx / dy */
+      double est_angle = atan(slope);
+      /* Restrict deskew correction to +/- 15 degrees (~0.26 radians) */
+      if (fabs(est_angle) <= 0.2618 && fabs(est_angle) >= 0.003) {
+        angle = est_angle;
+      }
+    }
+  }
+
+  /* Step 3: Determine bounding box */
+  int min_y = edge_y[0];
+  int max_y = edge_y[num_edges - 1];
+
+  int min_x = w - 1;
+  int max_x = 0;
+  for (int i = 0; i < num_edges; i++) {
+    if (edge_left[i] < min_x)
+      min_x = edge_left[i];
+    if (edge_right[i] > max_x)
+      max_x = edge_right[i];
+  }
+
+  free(edge_y);
+  free(edge_left);
+  free(edge_right);
+
+  /* Check minimum document dimensions (e.g., at least 50x50 pixels) */
+  if ((max_x - min_x) < 50 || (max_y - min_y) < 50)
+    return;
+
+  if (!enable_crop && fabs(angle) < 0.003)
+    return;
+
+  /* If only deskewing without crop */
+  int crop_x0 = enable_crop ? min_x : 0;
+  int crop_y0 = enable_crop ? min_y : 0;
+  int crop_w = enable_crop ? (max_x - min_x + 1) : w;
+  int crop_h = enable_crop ? (max_y - min_y + 1) : h;
+
+  unsigned char *out_buf = (unsigned char *)malloc((size_t)crop_w * crop_h * 3);
+  if (!out_buf)
+    return;
+
+  double cos_a = cos(angle);
+  double sin_a = sin(angle);
+  double cx = crop_x0 + crop_w / 2.0;
+  double cy = crop_y0 + crop_h / 2.0;
+
+  for (int y = 0; y < crop_h; y++) {
+    double dy = (crop_y0 + y) - cy;
+    unsigned char *dst_row = out_buf + y * crop_w * 3;
+    for (int x = 0; x < crop_w; x++) {
+      double dx = (crop_x0 + x) - cx;
+      /* Rotate by -angle around center to un-skew */
+      double src_x = cx + (dx * cos_a - dy * sin_a);
+      double src_y = cy + (dx * sin_a + dy * cos_a);
+      sample_bilinear_rgb(src, w, h, src_x, src_y, dst_row + x * 3);
+    }
+  }
+
+  free(*p_rgb);
+  *p_rgb = out_buf;
+  *p_w = crop_w;
+  *p_h = crop_h;
+}
+
+/* Decode JPEG buffer and process resolution scaling, autocrop, deskew, and bit depth conversion */
 static SANE_Status decode_and_process_jpeg(IScanFly_Handle *h) {
   if (!h->jpeg_buf || h->jpeg_size == 0)
     return SANE_STATUS_IO_ERROR;
@@ -669,6 +924,39 @@ static SANE_Status decode_and_process_jpeg(IScanFly_Handle *h) {
   int is_lineart = (strcmp(h->scan_mode, SANE_VALUE_SCAN_MODE_LINEART) == 0);
   int threshold = h->opt_val[OPT_THRESHOLD];
 
+  /* Decode full image to RGB buffer */
+  unsigned char *rgb_buf = (unsigned char *)malloc((size_t)width * height * 3);
+  if (!rgb_buf) {
+    jpeg_finish_decompress(&cinfo);
+    jpeg_destroy_decompress(&cinfo);
+    return SANE_STATUS_NO_MEM;
+  }
+
+  JSAMPROW row_pointer[1];
+  row_pointer[0] = (JSAMPROW)malloc(width * 3);
+  if (!row_pointer[0]) {
+    free(rgb_buf);
+    jpeg_finish_decompress(&cinfo);
+    jpeg_destroy_decompress(&cinfo);
+    return SANE_STATUS_NO_MEM;
+  }
+
+  size_t line = 0;
+  while (cinfo.output_scanline < cinfo.output_height) {
+    jpeg_read_scanlines(&cinfo, row_pointer, 1);
+    memcpy(rgb_buf + (line * width * 3), row_pointer[0], width * 3);
+    line++;
+  }
+  free(row_pointer[0]);
+  jpeg_finish_decompress(&cinfo);
+  jpeg_destroy_decompress(&cinfo);
+
+  /* Process Auto-Crop and Deskew on decoded RGB raster prior to thresholding/conversion */
+  int enable_crop = (h->opt_val[OPT_AUTOCROP] == SANE_TRUE);
+  int enable_deskew = (h->opt_val[OPT_DESKEW] == SANE_TRUE);
+  process_autocrop_and_deskew(&rgb_buf, &width, &height, enable_crop,
+                             enable_deskew);
+
   size_t out_bytes_per_line;
   if (is_color) {
     out_bytes_per_line = width * 3;
@@ -683,49 +971,32 @@ static SANE_Status decode_and_process_jpeg(IScanFly_Handle *h) {
     free(h->raster_data);
   h->raster_data = (unsigned char *)malloc(total_raster_bytes);
   if (!h->raster_data) {
-    jpeg_finish_decompress(&cinfo);
-    jpeg_destroy_decompress(&cinfo);
+    free(rgb_buf);
     return SANE_STATUS_NO_MEM;
   }
 
   if (is_lineart) {
-    /* For Lineart: read the entire image as grayscale first, then apply
+    /* For Lineart: convert RGB to grayscale first, then apply
      * adaptive Bradley thresholding (or user-specified manual threshold) */
-    unsigned char *gray_buf = (unsigned char *)malloc(width * height);
+    unsigned char *gray_buf = (unsigned char *)malloc((size_t)width * height);
     if (!gray_buf) {
+      free(rgb_buf);
       free(h->raster_data);
       h->raster_data = NULL;
-      jpeg_finish_decompress(&cinfo);
-      jpeg_destroy_decompress(&cinfo);
       return SANE_STATUS_NO_MEM;
     }
 
-    JSAMPROW row_pointer[1];
-    row_pointer[0] = (JSAMPROW)malloc(width * 3);
-    if (!row_pointer[0]) {
-      free(gray_buf);
-      free(h->raster_data);
-      h->raster_data = NULL;
-      jpeg_finish_decompress(&cinfo);
-      jpeg_destroy_decompress(&cinfo);
-      return SANE_STATUS_NO_MEM;
-    }
-
-    size_t line = 0;
-    while (cinfo.output_scanline < cinfo.output_height) {
-      jpeg_read_scanlines(&cinfo, row_pointer, 1);
-      unsigned char *row_gray = gray_buf + (line * width);
+    for (int y = 0; y < height; y++) {
+      const unsigned char *src_row = rgb_buf + (y * width * 3);
+      unsigned char *row_gray = gray_buf + (y * width);
       for (int x = 0; x < width; x++) {
-        unsigned int r = row_pointer[0][x * 3 + 0];
-        unsigned int g = row_pointer[0][x * 3 + 1];
-        unsigned int b = row_pointer[0][x * 3 + 2];
+        unsigned int r = src_row[x * 3 + 0];
+        unsigned int g = src_row[x * 3 + 1];
+        unsigned int b = src_row[x * 3 + 2];
         row_gray[x] = (unsigned char)((77 * r + 150 * g + 29 * b) >> 8);
       }
-      line++;
     }
-    free(row_pointer[0]);
-    jpeg_finish_decompress(&cinfo);
-    jpeg_destroy_decompress(&cinfo);
+    free(rgb_buf);
 
     /* Binarization:
      * If threshold != ISCANFLY_DEFAULT_THRESHOLD (128), user explicitly set it.
@@ -815,39 +1086,22 @@ static SANE_Status decode_and_process_jpeg(IScanFly_Handle *h) {
       }
     }
     free(gray_buf);
+  } else if (is_color) {
+    memcpy(h->raster_data, rgb_buf, total_raster_bytes);
+    free(rgb_buf);
   } else {
-    /* Color or 8-bit Grayscale */
-    JSAMPROW row_pointer[1];
-    row_pointer[0] = (JSAMPROW)malloc(width * 3);
-    if (!row_pointer[0]) {
-      free(h->raster_data);
-      h->raster_data = NULL;
-      jpeg_finish_decompress(&cinfo);
-      jpeg_destroy_decompress(&cinfo);
-      return SANE_STATUS_NO_MEM;
-    }
-
-    size_t line = 0;
-    while (cinfo.output_scanline < cinfo.output_height) {
-      jpeg_read_scanlines(&cinfo, row_pointer, 1);
-      unsigned char *dst = h->raster_data + (line * out_bytes_per_line);
-
-      if (is_color) {
-        memcpy(dst, row_pointer[0], width * 3);
-      } else {
-        for (int x = 0; x < width; x++) {
-          unsigned int r = row_pointer[0][x * 3 + 0];
-          unsigned int g = row_pointer[0][x * 3 + 1];
-          unsigned int b = row_pointer[0][x * 3 + 2];
-          dst[x] = (unsigned char)((77 * r + 150 * g + 29 * b) >> 8);
-        }
+    /* 8-bit Grayscale */
+    for (int y = 0; y < height; y++) {
+      const unsigned char *src_row = rgb_buf + (y * width * 3);
+      unsigned char *dst_row = h->raster_data + (y * width);
+      for (int x = 0; x < width; x++) {
+        unsigned int r = src_row[x * 3 + 0];
+        unsigned int g = src_row[x * 3 + 1];
+        unsigned int b = src_row[x * 3 + 2];
+        dst_row[x] = (unsigned char)((77 * r + 150 * g + 29 * b) >> 8);
       }
-      line++;
     }
-
-    free(row_pointer[0]);
-    jpeg_finish_decompress(&cinfo);
-    jpeg_destroy_decompress(&cinfo);
+    free(rgb_buf);
   }
   jpeg_destroy_decompress(&cinfo);
 
