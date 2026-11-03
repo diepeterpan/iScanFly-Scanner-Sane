@@ -12,7 +12,13 @@ This driver allows standard Linux scanning utilities (such as `scanimage`, GNOME
 - **Scan Modes**:
   - `Color`: 24-bit RGB (decompressed from the scanner's native JPEG stream).
   - `Gray`: 8-bit Grayscale (integer-weighted luminance calculation: $Y = 0.299R + 0.587G + 0.114B$).
-  - `Lineart`: 1-bit Black & White text mode with user-configurable thresholding (8 pixels per byte, MSB first).
+  - `Lineart`: 1-bit Black & White text mode with adaptive Bradley-Roth local thresholding or manual thresholding (8 pixels per byte, MSB first).
+- **Auto-Crop & Deskew**:
+  - Automatically detects paper boundaries against the scanner backing.
+  - Straightens tilted pages via high-precision bilinear interpolation (angles up to $\pm 15^\circ$).
+  - Crops flush to the paper edge across all color modes and resolutions.
+  - In `Lineart` mode, crop and deskew run *before* binarization, completely eliminating scanner backing black borders.
+  - Enabled by default (`yes`), with configurable overrides via SANE options (`--autocrop`, `--deskew`) or `/etc/sane.d/iscanfly.conf`.
 - **Resolutions**:
   - `300 dpi` (Standard hardware resolution).
   - `600 dpi` (Fine hardware resolution for firmware $\ge 26$).
@@ -78,11 +84,17 @@ cd dist
 sudo ./install.sh
 ```
 
-### Configure Scanner IP
-Edit `/etc/sane.d/iscanfly.conf` to set the IP address of your scanner on your Wi-Fi network:
+### Configure Scanner IP & Options
+Edit `/etc/sane.d/iscanfly.conf` to set the IP address of your scanner on your Wi-Fi network and default preprocessing options:
 
 ```ini
 # /etc/sane.d/iscanfly.conf
+
+# Global toggles (default: yes)
+autocrop yes
+deskew yes
+
+# Scanner IP and optional port (default port: 23)
 192.168.18.33
 # Or with explicit port:
 # 192.168.18.33:23
@@ -229,7 +241,7 @@ scanimage -d "iscanfly:net:192.168.18.33:23" --help
 
 ### Command Line Scanning (`scanimage`)
 
-- **Standard 300 DPI Color Scan (JPEG output)**:
+- **Standard 300 DPI Color Scan (JPEG output with Auto-Crop & Deskew)**:
   ```bash
   scanimage -d iscanfly --resolution 300 --mode Color --format=jpeg > scan.jpg
   ```
@@ -239,9 +251,15 @@ scanimage -d "iscanfly:net:192.168.18.33:23" --help
   scanimage -d iscanfly --resolution 150 --mode Gray --format=png > doc.png
   ```
 
-- **1-bit Black & White Text / OCR Mode**:
+- **1-bit Clean Black & White Text / OCR Mode**:
   ```bash
-  scanimage -d iscanfly --mode Lineart --threshold 128 --format=tiff > text.tif
+  scanimage -d iscanfly --mode Lineart --format=png > text.png
+  ```
+  *(Uses adaptive Bradley-Roth thresholding by default. To specify manual threshold: `--threshold 120`)*
+
+- **Disable Auto-Crop or Deskew for Raw Scan**:
+  ```bash
+  scanimage -d iscanfly --mode Color --autocrop=no --deskew=no --format=jpeg > raw.jpg
   ```
 
 - **Fine 600 DPI Scan**:
