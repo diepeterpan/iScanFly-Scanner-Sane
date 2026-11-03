@@ -1,3 +1,26 @@
+# ==============================================================================
+# Multi-stage Dockerfile for iScanFly SANE + AirSane Server
+# ==============================================================================
+
+# Stage 1: Build the iScanFly SANE driver from source
+FROM debian:trixie-slim AS driver-builder
+
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    build-essential \
+    libsane-dev \
+    libjpeg-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY include/ include/
+COPY src/ src/
+COPY conf/ conf/
+COPY scripts/ scripts/
+COPY Makefile Makefile
+
+RUN make dist
+
+# Stage 2: Runtime image with AirSane and iScanFly backend
 FROM debian:trixie-slim
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -22,15 +45,15 @@ RUN sed -i '/^[[:space:]]*enable-dbus[[:space:]]*=/d; /^\[server\]/a enable-dbus
     sed -i '/^[[:space:]]*use-ipv6[[:space:]]*=/d; /^\[server\]/a use-ipv6=no' /etc/avahi/avahi-daemon.conf && \
     usermod -aG scanner,avahi saned
 
-# Copy built iScanFly SANE driver from dist/
-COPY dist/libsane-iscanfly.so.1.0.0 /usr/lib/x86_64-linux-gnu/sane/
+# Copy built iScanFly SANE driver from stage 1 driver-builder
+COPY --from=driver-builder /build/dist/libsane-iscanfly.so.1.0.0 /usr/lib/x86_64-linux-gnu/sane/
 RUN ln -sf libsane-iscanfly.so.1.0.0 /usr/lib/x86_64-linux-gnu/sane/libsane-iscanfly.so.1 && \
     ln -sf libsane-iscanfly.so.1 /usr/lib/x86_64-linux-gnu/sane/libsane-iscanfly.so && \
     mkdir -p /etc/sane.d/dll.d && \
     echo "iscanfly" > /etc/sane.d/dll.d/iscanfly && \
     ldconfig
 
-COPY dist/iscanfly.conf /etc/sane.d/iscanfly.conf
+COPY --from=driver-builder /build/dist/iscanfly.conf /etc/sane.d/iscanfly.conf
 
 EXPOSE 8090
 
