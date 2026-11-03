@@ -55,11 +55,6 @@ RUN ln -sf libsane-iscanfly.so.1.0.0 /usr/lib/x86_64-linux-gnu/sane/libsane-isca
 
 COPY --from=driver-builder /build/dist/iscanfly.conf /etc/sane.d/iscanfly.conf
 
-# Copy Ralink RT2870/RT5370 firmware into container rootfs
-RUN mkdir -p /lib/firmware
-COPY docker/firmware/rt2870.bin /lib/firmware/rt2870.bin
-RUN ln -sf rt2870.bin /lib/firmware/rt3070.bin 2>/dev/null || true
-
 EXPOSE 8090
 
 COPY docker/wifi-connector.sh /usr/local/bin/wifi-connector.sh

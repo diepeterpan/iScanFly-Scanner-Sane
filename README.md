@@ -152,7 +152,25 @@ services:
       - AVAHI_DOMAIN=local
 ```
 
-### USB RT5370 Wi-Fi Client Features
+### USB RT5370 Wi-Fi Client Features & Host Prerequisites
+
+#### ⚠️ Host Prerequisite: Wireless Firmware
+Because the Linux kernel driver (`rt2800usb`) executes in the **host kernel**, the host system must have the Ralink / MediaTek firmware package installed. The container does not and cannot inject kernel firmware into the host kernel.
+
+Install the firmware package on your host Linux system using your package manager (ensure `non-free-firmware` / `non-free` repositories are enabled):
+
+```bash
+# Debian / Ubuntu host:
+sudo apt update && sudo apt install -y firmware-misc-nonfree firmware-mediatek
+
+# Arch Linux:
+# sudo pacman -S linux-firmware
+
+# Fedora / RHEL:
+# sudo dnf install linux-firmware
+```
+
+#### Wi-Fi Connector Capabilities
 When `WIFI_ENABLED=true` is set:
 - **Automatic Interface Discovery**: Dynamically detects the RT5370 interface (`wlan0`, `wlx...`) and unblocks `rfkill`.
 - **Protected Routing**: The container requests a DHCP lease without installing a default gateway (`0.0.0.0/0`), binding only the local scanner subnet (`192.168.18.0/24`) to the Wi-Fi card. This ensures your host machine's internet and primary network routes are never interrupted.
