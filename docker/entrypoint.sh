@@ -1,0 +1,66 @@
+#!/bin/bash
+set -euo pipefail
+
+# ==============================================================================
+# entrypoint.sh - Starts D-Bus, Avahi daemon, and AirSane for iScanFly
+# ==============================================================================
+
+mdns_announce="${MDNS_ANNOUNCE:-true}"
+airsane_debug="${AIRSANE_DEBUG:-true}"
+airsane_listen_port="${AIRSANE_LISTEN_PORT:-8090}"
+announce_secure="${ANNOUNCE_SECURE:-false}"
+announce_base_url="${ANNOUNCE_BASE_URL:-}"
+scanner_ip="${SCANNER_IP:-192.168.18.33}"
+
+echo "=== Starting iScanFly AirSane (eSCL) Server ==="
+
+# 1. Update /etc/sane.d/iscanfly.conf if SCANNER_IP is set
+if [ -n "$scanner_ip" ]; then
+    echo "[entrypoint] Setting scanner address in /etc/sane.d/iscanfly.conf: $scanner_ip"
+    echo "$scanner_ip" > /etc/sane.d/iscanfly.conf
+fi
+
+# 2. Start D-Bus system daemon
+mkdir -p /run/dbus
+rm -f /run/dbus/pid /run/dbus/system_bus_socket
+dbus-daemon --system --fork
+
+# 3. Start Avahi daemon if mDNS announce is requested
+avahi_pid=
+if [ "$mdns_announce" = "true" ]; then
+    echo "[entrypoint] Starting Avahi daemon for mDNS/Bonjour discovery..."
+    mkdir -p /run/avahi-daemon
+    rm -f /run/avahi-daemon/pid
+
+    # Configure Avahi hostname if supplied
+    if [ -n "${AVAHI_HOST_NAME:-}" ]; then
+        sed -i "s/^#*host-name=.*/host-name=${AVAHI_HOST_NAME}/" /etc/avahi/avahi-daemon.conf
+    fi
+
+    avahi-daemon -D
+    sleep 1
+fi
+
+cleanup() {
+    echo "[entrypoint] Caught signal, shutting down..."
+    if [ -f /run/avahi-daemon/pid ]; then
+        kill -TERM "$(cat /run/avahi-daemon/pid)" 2>/dev/null || true
+    fi
+    exit 0
+}
+
+trap cleanup SIGINT SIGTERM
+
+echo "[entrypoint] Probing SANE scanner backend:"
+scanimage -L || true
+
+echo "[entrypoint] Executing airsaned on port $airsane_listen_port (debug=$airsane_debug)..."
+
+# Execute airsaned directly as user saned
+exec runuser -u saned -- /usr/local/bin/airsaned \
+    "--listen-port=$airsane_listen_port" \
+    "--mdns-announce=$mdns_announce" \
+    "--announce-secure=$announce_secure" \
+    "--announce-base-url=$announce_base_url" \
+    --access-log=- \
+    "--debug=$airsane_debug"

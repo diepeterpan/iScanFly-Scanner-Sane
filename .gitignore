@@ -1,0 +1,49 @@
+# ==============================================================================
+# .gitignore for iScanFly SANE Driver
+# ==============================================================================
+
+# Compiled Object files and libraries
+*.o
+*.lo
+*.la
+*.so
+*.so.*
+*.dylib
+*.dll
+*.a
+
+# Standalone CLI tools & binaries
+tools/s400w
+tools/*.o
+
+# Distribution package (built on-demand via Docker)
+dist/
+
+# Core dumps & debug logs
+core
+core.*
+vgcore.*
+*.log
+*.dmp
+
+# Scanned test output images
+*.jpg
+*.jpeg
+*.png
+*.pnm
+*.tif
+*.tiff
+*.raw
+
+# Editor & IDE artifacts
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.bak
+
+# OS specific files
+.DS_Store
+Thumbs.db
+.directory

@@ -1,0 +1,19 @@
+services:
+  airsane:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: iscanfly-airsane:latest
+    container_name: iscanfly-airsane
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      - TZ=Africa/Johannesburg
+      - SCANNER_IP=192.168.18.33
+      - MDNS_ANNOUNCE=true
+      - AIRSANE_DEBUG=true
+      - AIRSANE_LISTEN_PORT=8090
+      - ANNOUNCE_SECURE=false
+      - ANNOUNCE_BASE_URL=
+      - AVAHI_HOST_NAME=iscanfly
+      - AVAHI_DOMAIN=local
