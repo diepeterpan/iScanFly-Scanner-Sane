@@ -1,0 +1,25 @@
+--- a/server/scanner.cpp
++++ b/server/scanner.cpp
+@@ -388,7 +388,7 @@ Scanner::Private::temporaryAdfStatusString()
+   mTemporaryAdfStatus = SANE_STATUS_GOOD;
+   switch (adfStatus) {
+     case SANE_STATUS_GOOD:
+-      return isOpen() ? "ScannerAdfLoaded" : "ScannerAdfEmpty";
++      return isOpen() ? "ScannerAdfProcessing" : "ScannerAdfLoaded";
+     case SANE_STATUS_JAMMED:
+       return "ScannerAdfJam";
+     case SANE_STATUS_COVER_OPEN:
+@@ -987,6 +987,12 @@ Scanner::writeScannerStatusXml(std::ostream& os) const
+      << p->statusString()
+      << "</pwg:State>\r\n";
+ 
++  if (hasAdf()) {
++    const char* adfState = p->temporaryAdfStatusString();
++    if (!adfState || !*adfState)
++      adfState = isOpen() ? "ScannerAdfProcessing" : "ScannerAdfLoaded";
++    os << "<scan:AdfState>" << adfState << "</scan:AdfState>\r\n";
++  }
+   os << "<scan:Jobs>\r\n";
+   std::lock_guard<std::mutex> lock(p->mJobsMutex);
+   for (const auto& job : p->mJobs)
+

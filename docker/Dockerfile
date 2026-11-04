@@ -32,13 +32,15 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
     libsane-dev libjpeg-dev libpng-dev libavahi-client-dev libusb-1.0-0-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Build and install AirSane (eSCL AirScan server)
+# Build and install AirSane (eSCL AirScan server) with ADF status patch
+COPY docker/patches/ /tmp/patches/
 RUN git clone --depth 1 https://github.com/SimulPiscator/AirSane.git /tmp/AirSane && \
+    (cd /tmp/AirSane && git apply /tmp/patches/airsane-adfstate.patch) && \
     cmake -S /tmp/AirSane -B /tmp/AirSane-build -DCMAKE_BUILD_TYPE=Release && \
     cmake --build /tmp/AirSane-build --parallel && \
     cmake --install /tmp/AirSane-build && \
     rm -f /lib/systemd/system/airsaned.service && \
-    rm -rf /tmp/AirSane /tmp/AirSane-build
+    rm -rf /tmp/AirSane /tmp/AirSane-build /tmp/patches
 
 # Configure Avahi and saned user permissions
 RUN sed -i '/^[[:space:]]*enable-dbus[[:space:]]*=/d; /^\[server\]/a enable-dbus=yes' /etc/avahi/avahi-daemon.conf && \
