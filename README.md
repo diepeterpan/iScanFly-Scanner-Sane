@@ -125,9 +125,69 @@ If you run a dedicated headless scanner server (such as a Raspberry Pi or home s
 
 ## 4. Running via Docker & AirSane (eSCL / Apple AirScan Server)
 
-For headless home servers, NAS devices, or Docker environments, you can run the scanner server using Docker and Docker Compose located in [`docker/`](file:///home/andre/Development/iScanFly-Scanner/docker).
+For headless home servers, NAS devices, or Docker environments, you can run the scanner server using Docker and Docker Compose located in [`docker/`](docker).
 
 This container bundles **SANE**, the **iScanFly driver**, and **[AirSane](https://github.com/SimulPiscator/AirSane)** (an Apple AirScan / eSCL server) with **Avahi mDNS/Bonjour discovery**. Any phone (iOS/Android), Mac, or Linux computer on your local network will automatically discover the scanner wirelessly with zero drivers required on client devices.
+
+### Architecture Overview
+
+The following diagram illustrates how the Docker container uses a dedicated USB Wi-Fi dongle to communicate with the scanner while coexisting seamlessly with your host system and home/office network:
+
+```mermaid
+flowchart TD
+    subgraph LAN["Home / Office Local Network (LAN)"]
+        Clients["Scanning Clients<br/>(NAPS2, Apple Image Capture, Mopria, Paperless-ngx)<br/>Subnet: 192.168.1.0/24"]
+    end
+
+    subgraph Host["Host Machine (Linux Server / NAS / Raspberry Pi)"]
+        HostEth["Host LAN Interface (eth0 / eno1)<br/>IP: 192.168.1.50 (Default Route: 0.0.0.0/0)"]
+        Kernel["Host Linux Kernel<br/>• rt2800usb driver & firmware<br/>• NetworkManager (wlx* unmanaged)"]
+        USBDongle["Physical USB Wi-Fi Dongle<br/>(Ralink RT5370 / wlx...)"]
+
+        subgraph Container["Docker Container: iscanfly-airsane (network_mode: host, privileged: true)"]
+            Avahi["Avahi Daemon (mDNS / Bonjour)<br/>Announces _uscan._tcp on LAN"]
+            AirSane["AirSane Server (airsaned)<br/>eSCL / AirScan HTTP Server (:8090)"]
+            SANE["libsane-iscanfly Backend<br/>(Auto-Crop, Deskew, 1-bit Lineart)"]
+            WifiMgr["wifi-connector.sh<br/>• wpa_supplicant (SSID: iScanAir)<br/>• DHCP without default gateway"]
+        end
+    end
+
+    subgraph ScannerWLAN["Scanner Ad-Hoc / AP Wi-Fi Network"]
+        ScannerAP["Mustek S400W / iScanFly Hardware<br/>SSID: iScanAir | IP: 192.168.18.33:23"]
+    end
+
+    %% Network Connections
+    Clients <== "eSCL / AirScan HTTP (:8090) & mDNS (:5353)" ==> HostEth
+    HostEth <--> AirSane
+    HostEth <--> Avahi
+
+    %% USB & Driver interaction
+    USBDongle <== "USB Passthrough (/dev/bus/usb)" ==> Kernel
+    Kernel <== "netlink (nl80211) & rfkill" ==> WifiMgr
+
+    %% Wi-Fi Connection
+    WifiMgr <== "Wi-Fi (802.11 b/g/n) Subnet: 192.168.18.0/24" ==> ScannerAP
+
+    %% Internal Data Flow
+    AirSane --> SANE
+    SANE -- "TCP Port 23 (Raw JPEG Stream)" --> ScannerAP
+
+    classDef lan fill:#e1f5fe,stroke:#0288d1,stroke-width:2px;
+    classDef host fill:#ede7f6,stroke:#512da8,stroke-width:2px;
+    classDef container fill:#e8f5e9,stroke:#388e3c,stroke-width:2px;
+    classDef scanner fill:#fff3e0,stroke:#f57c00,stroke-width:2px;
+
+    class LAN,Clients lan;
+    class Host,HostEth,Kernel,USBDongle host;
+    class Container,Avahi,AirSane,SANE,WifiMgr container;
+    class ScannerWLAN,ScannerAP scanner;
+```
+
+#### How It Works:
+1. **Dual-Homing Isolation**: The host machine stays connected to your primary home/office LAN (`192.168.1.0/24`) via Ethernet or primary Wi-Fi, preserving uninterrupted internet access and local network connectivity.
+2. **Protected Routing**: The container's `wifi-connector.sh` brings up the dedicated USB Wi-Fi dongle (`wlx*`) and obtains a DHCP lease from the scanner's internal AP (`192.168.18.0/24`) **without installing a default gateway** (`0.0.0.0/0`). This routes only scanner traffic over the dongle.
+3. **Hardware / Radio Passthrough**: Running with `network_mode: host`, `privileged: true`, and volume mapping `/dev/bus/usb` gives the container direct access to configure `wpa_supplicant` and manage radio state (`rfkill`) without needing manual intervention.
+4. **AirScan / eSCL Bridge**: Incoming requests from scanning clients on your LAN (port 8090) are converted by AirSane and `libsane-iscanfly` into raw TCP port 23 commands directed to `192.168.18.33:23`.
 
 ### Quick Start with Docker Compose
 ```bash
