@@ -1,5 +1,9 @@
 # iScanFly / Mustek S400W (iScan Air) SANE Backend Driver
 
+<p align="center">
+  <img src="docs/images/iscan-air.jpg" alt="Mustek iScan Air / S400W Scanner" width="380" />
+</p>
+
 A Linux [SANE](http://www.sane-project.org/) (Scanner Access Now Easy) backend driver for the **Mustek S400W iScan Air** (also branded as **iScanFly**) Wi-Fi sheet-fed scanner.
 
 This driver allows standard Linux scanning utilities (such as `scanimage`, GNOME Document Scanner / Simple Scan, XSane, and OCR suites) to communicate with the scanner over Wi-Fi.
