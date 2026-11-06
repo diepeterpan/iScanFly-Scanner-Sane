@@ -24,7 +24,7 @@ RUN make dist
 FROM debian:trixie-slim
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    ca-certificates curl \
+    ca-certificates curl iputils-ping \
     libjpeg62-turbo libusb-1.0-0 \
     sane-utils libsane1 libsane-common sane-airscan avahi-daemon dbus \
     bash iproute2 iw wpasupplicant isc-dhcp-client rfkill \

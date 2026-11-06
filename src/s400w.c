@@ -303,6 +303,29 @@ static const char *readResponse(struct S400W *s400w, int fd, long timeout) {
       recvResponse(s400w, fd, s400w->buffer, sizeof(s400w->buffer), timeout));
 }
 
+/* Sends a 4-byte command and reads a normal response with automatic retry if
+ * the first command packet was dropped or delayed over Wi-Fi. */
+static const char *sendCommandAndRead(struct S400W *s400w, int fd,
+                                      const char *command, long timeout) {
+  long attempt_timeout = (timeout > 4000) ? 3500 : timeout;
+  for (int attempt = 0; attempt < 2; attempt++) {
+    if (attempt > 0) {
+      _log(s400w, S400W_LOG_WARN,
+           "sendCommandAndRead(%x): no response, retrying command (attempt "
+           "%d)...",
+           *(const unsigned int *)command, attempt + 1);
+      mssleep(200);
+    }
+    if (sendCommand(s400w, fd, command) > 0) {
+      const char *res = readResponse(s400w, fd, attempt_timeout);
+      if (res != NULL && res != S400W_EOF) {
+        return res;
+      }
+    }
+  }
+  return NULL;
+}
+
 /*///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Public /
 /////////*/
@@ -331,11 +354,10 @@ const char *s400w_get_version(struct S400W *s400w) {
   const char *response = S400W_EOF;
   int fd = openSocket(s400w);
   if (fd > 0) {
-    if (sendCommand(s400w, fd, GET_VERSION) > 0) {
-      response = readResponse(s400w, fd, s400w->timeout.normal);
-      _log(s400w, S400W_LOG_DEBUG, "get_version(): %s",
-           response ? response : "NULL");
-    }
+    response =
+        sendCommandAndRead(s400w, fd, GET_VERSION, s400w->timeout.normal);
+    _log(s400w, S400W_LOG_DEBUG, "get_version(): %s",
+         response ? response : "NULL");
     closesocket(fd);
     mssleep(100);
   }
@@ -346,11 +368,9 @@ const char *s400w_get_status(struct S400W *s400w) {
   const char *response = S400W_EOF;
   int fd = openSocket(s400w);
   if (fd > 0) {
-    if (sendCommand(s400w, fd, GET_STATUS) > 0) {
-      response = readResponse(s400w, fd, s400w->timeout.normal);
-      _log(s400w, S400W_LOG_DEBUG, "get_status(): %s",
-           response ? response : "NULL");
-    }
+    response = sendCommandAndRead(s400w, fd, GET_STATUS, s400w->timeout.normal);
+    _log(s400w, S400W_LOG_DEBUG, "get_status(): %s",
+         response ? response : "NULL");
     closesocket(fd);
     mssleep(100);
   }
@@ -361,16 +381,15 @@ int s400w_set_resolution(struct S400W *s400w, int dpi) {
   int result = -1;
   int fd = openSocket(s400w);
   if (fd > 0) {
-    if (sendCommand(s400w, fd, dpi == 600 ? SET_DPI_HIGH : SET_DPI_STANDARD) >
-        0) {
-      const char *response = readResponse(s400w, fd, s400w->timeout.normal);
-      _log(s400w, S400W_LOG_DEBUG, "set_resolution(%d): %s", dpi,
-           response ? response : "NULL");
-      result = (dpi == 600 && response == S400W_DPI_HIGH) ||
-                       (dpi != 600 && response == S400W_DPI_STANDARD)
-                   ? 0
-                   : -1;
-    }
+    const char *response = sendCommandAndRead(
+        s400w, fd, dpi == 600 ? SET_DPI_HIGH : SET_DPI_STANDARD,
+        s400w->timeout.normal);
+    _log(s400w, S400W_LOG_DEBUG, "set_resolution(%d): %s", dpi,
+         response ? response : "NULL");
+    result = (dpi == 600 && response == S400W_DPI_HIGH) ||
+                     (dpi != 600 && response == S400W_DPI_STANDARD)
+                 ? 0
+                 : -1;
     closesocket(fd);
     mssleep(100);
   }
@@ -444,38 +463,45 @@ const char *s400w_scan(struct S400W *s400w, int resolution,
     int abort = 0;
     char *buffer = (char *)malloc(bufferSize);
 
-    if (sendCommand(s400w, fd, GET_STATUS) > 0) {
-      response = readResponse(s400w, fd, s400w->timeout.normal);
+    for (int wait_sec = 0;; wait_sec++) {
+      response =
+          sendCommandAndRead(s400w, fd, GET_STATUS, s400w->timeout.normal);
       _log(s400w, S400W_LOG_DEBUG, "scan().check: %s",
            response ? response : "NULL");
-      if (response != S400W_SCAN_READY)
+      if (response == S400W_SCAN_READY)
+        break;
+      if (response == S400W_BATTERY_LOW) {
+        _log(s400w, S400W_LOG_WARN, "Warning: battery low");
+      }
+      if (s400w->paper_wait_sec <= 0 || wait_sec >= s400w->paper_wait_sec ||
+          (s400w->cancelled && *s400w->cancelled) ||
+          (response != S400W_NO_PAPER && response != S400W_BATTERY_LOW)) {
         abort = 1;
-    } else
-      abort = 1;
-
-    if (!abort && resolution > 0) {
-      if (sendCommand(s400w, fd,
-                      resolution == 600 ? SET_DPI_HIGH : SET_DPI_STANDARD) >
-          0) {
-        response = readResponse(s400w, fd, s400w->timeout.normal);
-        _log(s400w, S400W_LOG_DEBUG, "scan().dpi(%d): %s", resolution,
-             response ? response : "NULL");
-        abort = (resolution == 600 && response == S400W_DPI_HIGH) ||
-                        (resolution != 600 && response == S400W_DPI_STANDARD)
-                    ? 0
-                    : 1;
-      } else
-        abort = 1;
+        break;
+      }
+      mssleep(1000);
     }
 
-    if (!abort && sendCommand(s400w, fd, START_SCAN) > 0) {
-      response = readResponse(s400w, fd, s400w->timeout.normal);
+    if (!abort && resolution > 0) {
+      response = sendCommandAndRead(
+          s400w, fd, resolution == 600 ? SET_DPI_HIGH : SET_DPI_STANDARD,
+          s400w->timeout.normal);
+      _log(s400w, S400W_LOG_DEBUG, "scan().dpi(%d): %s", resolution,
+           response ? response : "NULL");
+      abort = (resolution == 600 && response == S400W_DPI_HIGH) ||
+                      (resolution != 600 && response == S400W_DPI_STANDARD)
+                  ? 0
+                  : 1;
+    }
+
+    if (!abort) {
+      response =
+          sendCommandAndRead(s400w, fd, START_SCAN, s400w->timeout.normal);
       _log(s400w, S400W_LOG_DEBUG, "scan().go: %s",
            response ? response : "NULL");
       if (response != S400W_SCAN_GO)
         abort = 1;
-    } else
-      abort = 1;
+    }
 
     if (!abort && previewFunc) {
       if (sendCommand(s400w, fd, SEND_PREVIEW_DATA) > 0) {

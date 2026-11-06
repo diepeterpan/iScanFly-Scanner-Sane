@@ -177,18 +177,15 @@ EOF_DH
         dhclient -cf "$dhclient_conf" -1 -v "$IFACE" 2>&1 | while read -r line; do log "[dhclient] $line"; done || true
     fi
 
-    # Probe scanner at 192.168.18.33 to warm up ARP table without opening TCP port 23
-    log "Verifying scanner connectivity (192.168.18.33)..."
-    if command -v ping >/dev/null 2>&1; then
-        if ping -c 1 -W 2 192.168.18.33 >/dev/null 2>&1; then
-            log "Scanner 192.168.18.33 reached via ICMP!"
-        else
-            log "Notice: initial ICMP probe to 192.168.18.33 did not reply (warming ARP via UDP/route lookup)"
-        fi
-    elif timeout 2 bash -c "</dev/tcp/192.168.18.33/23" 2>/dev/null; then
-        log "Scanner port 23 reached successfully!"
+    # Verify scanner route/ARP entry without ever opening TCP port 23
+    # (opening and closing port 23 without sending a 4-byte S400W command wedges the scanner firmware!)
+    log "Verifying scanner route & ARP readiness (192.168.18.33)..."
+    if command -v ping >/dev/null 2>&1 && ping -c 1 -W 2 192.168.18.33 >/dev/null 2>&1; then
+        log "Scanner 192.168.18.33 reached via ICMP!"
+    elif ip neigh show 192.168.18.33 2>/dev/null | grep -q .; then
+        log "Scanner 192.168.18.33 present in ARP table ($(ip neigh show 192.168.18.33 | tr '\n' ' '))"
     else
-        log "Notice: initial probe to 192.168.18.33:23 did not connect (scanner may be waking up)"
+        log "Route to 192.168.18.33 active on $IFACE"
     fi
 }
 

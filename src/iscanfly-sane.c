@@ -53,12 +53,10 @@ static int current_log_level = S400W_LOG_WARN;
 static int default_max_bad_lines = ISCANFLY_DEFAULT_MAX_BAD_LINES;
 
 /* Mutex and state to serialize access to the single-threaded S400W TCP port 23
- * stack and prevent background option polling from colliding with active scans
+ * stack and prevent concurrent operations from colliding with active scans
  */
 static pthread_mutex_t iscanfly_lock = PTHREAD_MUTEX_INITIALIZER;
 static volatile int scan_in_progress = 0;
-static time_t last_status_time = 0;
-static const char *last_status_val = NULL;
 
 /* Parse max_bad_lines integer value (>= 0) */
 static int parse_max_bad_lines(const char *str) {
@@ -618,27 +616,6 @@ void sane_iscanfly_close(SANE_Handle handle) {
   pthread_mutex_unlock(&iscanfly_lock);
 }
 
-/* Query scanner status with caching and active-scan collision avoidance */
-static const char *query_cached_status(IScanFly_Handle *h) {
-  if (scan_in_progress || h->scanning) {
-    return S400W_SCAN_READY;
-  }
-  if (pthread_mutex_trylock(&iscanfly_lock) != 0) {
-    return S400W_SCAN_READY;
-  }
-  time_t now = time(NULL);
-  if (last_status_val != NULL && (now - last_status_time) < 2) {
-    const char *cached = last_status_val;
-    pthread_mutex_unlock(&iscanfly_lock);
-    return cached;
-  }
-  const char *st = s400w_get_status(&h->s400w);
-  last_status_val = st;
-  last_status_time = time(NULL);
-  pthread_mutex_unlock(&iscanfly_lock);
-  return st;
-}
-
 const SANE_Option_Descriptor *
 sane_iscanfly_get_option_descriptor(SANE_Handle handle, SANE_Int option) {
   IScanFly_Handle *h = (IScanFly_Handle *)handle;
@@ -676,20 +653,16 @@ SANE_Status sane_iscanfly_control_option(SANE_Handle handle, SANE_Int option,
     case OPT_PAPER_TIMEOUT:
       *(SANE_Word *)value = h->opt_val[option];
       break;
-    case OPT_PAGE_LOADED: {
-      const char *st = query_cached_status(h);
-      h->opt_val[OPT_PAGE_LOADED] =
-          (st == S400W_SCAN_READY) ? SANE_TRUE : SANE_FALSE;
-      *(SANE_Word *)value = h->opt_val[OPT_PAGE_LOADED];
+    case OPT_PAGE_LOADED:
+      /* Do not open a live TCP connection to port 23 during option enumeration
+       * or idle polling; report SANE_TRUE so frontends/AirSane proceed to
+       * sane_start(), where paper-wait-timeout handles sheet insertion. */
+      h->opt_val[OPT_PAGE_LOADED] = SANE_TRUE;
+      *(SANE_Word *)value = SANE_TRUE;
       break;
-    }
-    case OPT_BATTERY_LOW: {
-      const char *st = query_cached_status(h);
-      h->opt_val[OPT_BATTERY_LOW] =
-          (st == S400W_BATTERY_LOW) ? SANE_TRUE : SANE_FALSE;
+    case OPT_BATTERY_LOW:
       *(SANE_Word *)value = h->opt_val[OPT_BATTERY_LOW];
       break;
-    }
     default:
       return SANE_STATUS_INVAL;
     }
@@ -768,7 +741,6 @@ SANE_Status sane_iscanfly_control_option(SANE_Handle handle, SANE_Int option,
         return SANE_STATUS_DEVICE_BUSY;
       pthread_mutex_lock(&iscanfly_lock);
       const char *res = s400w_calibrate(&h->s400w);
-      last_status_time = 0;
       pthread_mutex_unlock(&iscanfly_lock);
       if (res == S400W_NO_PAPER)
         return SANE_STATUS_NO_DOCS;
@@ -781,7 +753,6 @@ SANE_Status sane_iscanfly_control_option(SANE_Handle handle, SANE_Int option,
         return SANE_STATUS_DEVICE_BUSY;
       pthread_mutex_lock(&iscanfly_lock);
       const char *res = s400w_clean(&h->s400w);
-      last_status_time = 0;
       pthread_mutex_unlock(&iscanfly_lock);
       if (res == S400W_NO_PAPER)
         return SANE_STATUS_NO_DOCS;
@@ -1399,58 +1370,38 @@ SANE_Status sane_iscanfly_start(SANE_Handle handle) {
   scan_in_progress = 1;
   h->cancelled = SANE_FALSE;
 
-  int timeout_sec = h->opt_val[OPT_PAPER_TIMEOUT];
-  int elapsed = 0;
-  const char *st = NULL;
-
-  while (1) {
-    st = s400w_get_status(&h->s400w);
-    last_status_val = st;
-    last_status_time = time(NULL);
-    if (st == S400W_SCAN_READY) {
-      break;
-    } else if (st == S400W_BATTERY_LOW) {
-      iscanfly_log(S400W_LOG_WARN, "Warning: battery low");
-    }
-
-    if (timeout_sec <= 0 || elapsed >= timeout_sec) {
-      scan_in_progress = 0;
-      pthread_mutex_unlock(&iscanfly_lock);
-      return (st == S400W_NO_PAPER) ? SANE_STATUS_NO_DOCS
-                                    : SANE_STATUS_IO_ERROR;
-    }
-
-    if (h->cancelled) {
-      scan_in_progress = 0;
-      pthread_mutex_unlock(&iscanfly_lock);
-      return SANE_STATUS_CANCELLED;
-    }
-
-    sleep(1);
-    elapsed++;
-  }
-
-  /* Brief settle delay before opening scan socket so the scanner's embedded
-   * TCP stack finishes closing the status connection */
-  usleep(250000);
-
   int hw_dpi = 0;
   if (h->fw_version >= S400W_MIN_SET_RESOLUTION_FW) {
     hw_dpi = (h->opt_val[OPT_RESOLUTION] == 600) ? 600 : 300;
   }
 
+  /* Perform status polling and scan over a single unified TCP connection inside
+   * s400w_scan() so we never open and close a separate status socket right
+   * before starting a scan */
+  h->s400w.paper_wait_sec = h->opt_val[OPT_PAPER_TIMEOUT];
+  h->s400w.cancelled = (const volatile int *)&h->cancelled;
+
   JpegContext ctx = {h, 0};
   active_jpeg_ctx = &ctx;
   h->jpeg_size = 0;
 
-  s400w_scan(&h->s400w, hw_dpi, NULL, active_jpeg_receiver);
+  const char *scan_res =
+      s400w_scan(&h->s400w, hw_dpi, NULL, active_jpeg_receiver);
   active_jpeg_ctx = NULL;
-  last_status_time = 0;
+
+  h->opt_val[OPT_BATTERY_LOW] =
+      (scan_res == S400W_BATTERY_LOW) ? SANE_TRUE : SANE_FALSE;
 
   if (h->cancelled) {
     scan_in_progress = 0;
     pthread_mutex_unlock(&iscanfly_lock);
     return SANE_STATUS_CANCELLED;
+  }
+
+  if (scan_res == S400W_NO_PAPER) {
+    scan_in_progress = 0;
+    pthread_mutex_unlock(&iscanfly_lock);
+    return SANE_STATUS_NO_DOCS;
   }
 
   if (ctx.err != 0 || h->jpeg_size == 0) {
