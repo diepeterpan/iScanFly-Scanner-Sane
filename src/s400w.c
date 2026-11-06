@@ -487,7 +487,7 @@ const char *s400w_scan(struct S400W *s400w, int resolution,
                             s400w->timeout.data);
 
         /* if known response: error */
-        if (read > 0 && read <= sizeof(s400w->buffer) &&
+        if (read > 0 && read <= (int)sizeof(s400w->buffer) &&
             detectResponse(partBuf, read) != partBuf) {
           abort = 1;
           memset(s400w->buffer, 0, sizeof(s400w->buffer));

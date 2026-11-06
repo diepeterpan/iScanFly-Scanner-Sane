@@ -293,12 +293,12 @@ static void load_config(void) {
     char *colon = strchr(p, ':');
     if (colon) {
       *colon = '\0';
-      strncpy(host, p, sizeof(host) - 1);
+      snprintf(host, sizeof(host), "%.*s", (int)(sizeof(host) - 1), p);
       port = atoi(colon + 1);
       if (port <= 0)
         port = ISCANFLY_DEFAULT_PORT;
     } else {
-      strncpy(host, p, sizeof(host) - 1);
+      snprintf(host, sizeof(host), "%.*s", (int)(sizeof(host) - 1), p);
     }
 
     IScanFly_Device *dev =
