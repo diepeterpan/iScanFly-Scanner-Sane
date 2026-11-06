@@ -53,6 +53,7 @@ typedef struct IScanFly_Handle {
   /* Current scan state */
   SANE_Bool scanning;
   SANE_Bool cancelled;
+  int pages_scanned;
 
   /* Image buffer & decoded raster state */
   unsigned char *jpeg_buf;

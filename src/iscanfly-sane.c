@@ -1372,6 +1372,7 @@ SANE_Status sane_iscanfly_start(SANE_Handle handle) {
 
   int timeout_sec = h->opt_val[OPT_PAPER_TIMEOUT];
   int elapsed = 0;
+  int busy_retries = 0;
   const char *st = NULL;
 
   while (1) {
@@ -1382,6 +1383,24 @@ SANE_Status sane_iscanfly_start(SANE_Handle handle) {
       break;
     } else if (st == S400W_BATTERY_LOW) {
       iscanfly_log(S400W_LOG_WARN, "Warning: battery low");
+    }
+
+    /* For Page 2+ in an ADF session, do not wait 15s for paper insertion:
+     * only wait briefly if the roller is still ejecting Page 1 (devbusy),
+     * then return SANE_STATUS_NO_DOCS immediately on nopaper so the UI
+     * displays the finished scan right away. */
+    if (h->pages_scanned > 0) {
+      if (st == S400W_DEVICE_BUSY && busy_retries < 6 && !h->cancelled) {
+        busy_retries++;
+        usleep(500000);
+        continue;
+      }
+      h->pages_scanned = 0;
+      scan_in_progress = 0;
+      pthread_mutex_unlock(&iscanfly_lock);
+      return (st == S400W_NO_PAPER || st == S400W_DEVICE_BUSY)
+                 ? SANE_STATUS_NO_DOCS
+                 : SANE_STATUS_IO_ERROR;
     }
 
     if (timeout_sec <= 0 || elapsed >= timeout_sec) {
@@ -1440,6 +1459,7 @@ SANE_Status sane_iscanfly_start(SANE_Handle handle) {
   }
 
   h->scanning = SANE_TRUE;
+  h->pages_scanned++;
   scan_in_progress = 0;
   pthread_mutex_unlock(&iscanfly_lock);
   return SANE_STATUS_GOOD;
