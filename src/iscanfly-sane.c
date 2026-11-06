@@ -1401,17 +1401,23 @@ SANE_Status sane_iscanfly_start(SANE_Handle handle) {
     elapsed++;
   }
 
-  int hw_dpi = (h->opt_val[OPT_RESOLUTION] == 600) ? 600 : 300;
+  /* Allow scanner's single-threaded TCP server 200ms to finish closing the
+   * status socket before opening the scan session socket */
+  usleep(200000);
 
-  if (h->fw_version >= S400W_MIN_SET_RESOLUTION_FW) {
-    s400w_set_resolution(&h->s400w, hw_dpi);
-  }
+  int hw_dpi = (h->fw_version >= S400W_MIN_SET_RESOLUTION_FW)
+                   ? ((h->opt_val[OPT_RESOLUTION] == 600) ? 600 : 300)
+                   : 0;
 
   JpegContext ctx = {h, 0};
   active_jpeg_ctx = &ctx;
   h->jpeg_size = 0;
 
   s400w_scan(&h->s400w, hw_dpi, NULL, active_jpeg_receiver);
+  if (!h->cancelled && ctx.err == 0 && h->jpeg_size == 0) {
+    usleep(300000);
+    s400w_scan(&h->s400w, hw_dpi, NULL, active_jpeg_receiver);
+  }
   active_jpeg_ctx = NULL;
 
   if (h->cancelled) {

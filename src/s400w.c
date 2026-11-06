@@ -293,7 +293,7 @@ void s400w_init(struct S400W *s400w, const char *hostname, int port,
   s400w->hostname = hostname;
   s400w->port = port;
   s400w->message = message;
-  s400w->timeout.normal = 10000;
+  s400w->timeout.normal = 3000;
   s400w->timeout.data = 30000;
   s400w->timeout.jpeg_size = 20000;
   s400w->timeout.jpeg_only = 60000;
@@ -561,10 +561,10 @@ const char *s400w_scan(struct S400W *s400w, int resolution,
                   break;
 
                 /* If JPEG End-Of-Image (EOI: 0xFF 0xD9) marker arrived and no
-                 * more bytes are queued within 500ms, complete cleanly without
+                 * more bytes are queued within 200ms, complete cleanly without
                  * waiting 30s if firmware over-reported jpegsize */
                 if (total > 1024 && prev_byte == 0xFF && last_byte == 0xD9 &&
-                    (total >= size || !(checkStream(fd, 500) & 1))) {
+                    (total >= size || !(checkStream(fd, 200) & 1))) {
                   eoi_detected = 1;
                   _log(s400w, S400W_LOG_DEBUG,
                        "scan().jpeg: EOI (FF D9) reached at %d / %d bytes",
