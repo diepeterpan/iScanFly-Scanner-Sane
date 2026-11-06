@@ -567,7 +567,7 @@ const char *s400w_scan(struct S400W *s400w, int resolution,
         for (int data_attempt = 0; data_attempt < 2; data_attempt++) {
           if (data_attempt > 0) {
             _log(s400w, S400W_LOG_WARN,
-                 "scan().jpeg: incomplete transfer, retrying SEND_JPEG_DATA "
+                 "scan().jpeg: 0 bytes received, retrying SEND_JPEG_DATA "
                  "(attempt %d)...",
                  data_attempt + 1);
             mssleep(500);
@@ -575,19 +575,57 @@ const char *s400w_scan(struct S400W *s400w, int resolution,
           if (jpegFunc(S400W_JPEG_SIZE, size) == 0 &&
               sendCommand(s400w, fd, SEND_JPEG_DATA) > 0) {
             int read = 0, total = 0;
+            unsigned char prev_byte = 0, last_byte = 0;
+            int eoi_detected = 0;
             mssleep(500);
             do {
-              read = recvResponse(s400w, fd, buffer, bufferSize,
-                                  s400w->timeout.data);
+              /* Wait up to timeout.data for the first chunk; once streaming
+               * starts (total > 0), use a short 3s inter-chunk timeout so
+               * trailing padding or end-of-stream stalls don't block for 30s */
+              long chunk_timeout = (total > 0) ? 3000 : s400w->timeout.data;
+              if (total > 0 && !(checkStream(fd, chunk_timeout) & 1)) {
+                _log(s400w, S400W_LOG_WARN,
+                     "scan().jpeg: stream idle after %d / %d bytes", total,
+                     size);
+                read = 0;
+                break;
+              }
+              read = recvResponse(s400w, fd, buffer, bufferSize, chunk_timeout);
               if (read > 0) {
+                if (read >= 2) {
+                  prev_byte = (unsigned char)buffer[read - 2];
+                  last_byte = (unsigned char)buffer[read - 1];
+                } else if (read == 1) {
+                  prev_byte = last_byte;
+                  last_byte = (unsigned char)buffer[0];
+                }
                 total += read;
                 _log(s400w, S400W_LOG_TRACE, "scan().jpeg: %d / %d bytes",
                      total, size);
                 if (jpegFunc(buffer, read) != 0)
                   break;
+
+                /* Check for JPEG End-Of-Image (EOI: 0xFF 0xD9) marker when the
+                 * scanner firmware's reported jpegsize is larger than actual
+                 * compressed image bytes and no more data is queued */
+                if (total > 1024 && prev_byte == 0xFF && last_byte == 0xD9 &&
+                    (total >= size || !(checkStream(fd, 150) & 1))) {
+                  eoi_detected = 1;
+                  _log(s400w, S400W_LOG_DEBUG,
+                       "scan().jpeg: EOI (FF D9) reached at %d / %d bytes",
+                       total, size);
+                  break;
+                }
               }
             } while (total < size && read > 0);
-            if (total >= size) {
+            if (total >= size || eoi_detected) {
+              response = S400W_SCAN_READY;
+              abort = 0;
+              break;
+            }
+            if (total > 0) {
+              /* Preserve partial JPEG buffer so decode_and_process_jpeg() can
+               * apply scanline fault tolerance rather than wiping it */
               response = S400W_SCAN_READY;
               abort = 0;
               break;

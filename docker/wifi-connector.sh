@@ -91,6 +91,7 @@ if ! ip link set "$IFACE" up; then
     sleep 1
     ip link set "$IFACE" up || log "Notice: could not set interface UP directly, wpa_supplicant will attempt driver initialization."
 fi
+iw dev "$IFACE" set power_save off 2>/dev/null || true
 
 # 3. Generate wpa_supplicant.conf
 mkdir -p /run/wpa_supplicant
@@ -139,6 +140,7 @@ clean_interface() {
     sleep 1
     unblock_rfkill
     ip link set "$IFACE" up 2>/dev/null || true
+    iw dev "$IFACE" set power_save off 2>/dev/null || true
     sleep 1
 }
 
@@ -153,7 +155,8 @@ start_wpa_supplicant() {
 start_wpa_supplicant
 
 request_dhcp() {
-    log "Associated with '$WIFI_SSID'. Requesting DHCP without default gateway..."
+    log "Associated with '$WIFI_SSID'. Disabling 802.11 power save and requesting DHCP without default gateway..."
+    iw dev "$IFACE" set power_save off 2>/dev/null || true
     ip -4 addr flush dev "$IFACE" 2>/dev/null || true
 
     # Using dhclient with custom options, or dhcpcd -G (no default gateway), or udhcpc
