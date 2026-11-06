@@ -7,6 +7,8 @@
 #include <errno.h>
 #include <setjmp.h>
 #include <math.h>
+#include <time.h>
+#include <pthread.h>
 #include <jpeglib.h>
 // clang-format on
 
@@ -49,6 +51,14 @@ static int default_autocrop = 1;
 static int default_deskew = 1;
 static int current_log_level = S400W_LOG_WARN;
 static int default_max_bad_lines = ISCANFLY_DEFAULT_MAX_BAD_LINES;
+
+/* Mutex and state to serialize access to the single-threaded S400W TCP port 23
+ * stack and prevent background option polling from colliding with active scans
+ */
+static pthread_mutex_t iscanfly_lock = PTHREAD_MUTEX_INITIALIZER;
+static volatile int scan_in_progress = 0;
+static time_t last_status_time = 0;
+static const char *last_status_val = NULL;
 
 /* Parse max_bad_lines integer value (>= 0) */
 static int parse_max_bad_lines(const char *str) {
@@ -320,18 +330,7 @@ static void load_config(void) {
   }
 }
 
-SANE_Status sane_iscanfly_init(SANE_Int *version_code,
-                               SANE_Auth_Callback authorize) {
-  if (version_code) {
-    *version_code =
-        SANE_VERSION_CODE(SANE_CURRENT_MAJOR, SANE_CURRENT_MINOR, 0);
-  }
-  auth_callback = authorize;
-  load_config();
-  return SANE_STATUS_GOOD;
-}
-
-void sane_iscanfly_exit(void) {
+static void free_devices(void) {
   IScanFly_Device *cur = device_list;
   while (cur) {
     IScanFly_Device *next = cur->next;
@@ -347,6 +346,26 @@ void sane_iscanfly_exit(void) {
     free(sane_dev_list);
     sane_dev_list = NULL;
   }
+}
+
+SANE_Status sane_iscanfly_init(SANE_Int *version_code,
+                               SANE_Auth_Callback authorize) {
+  pthread_mutex_lock(&iscanfly_lock);
+  if (version_code) {
+    *version_code =
+        SANE_VERSION_CODE(SANE_CURRENT_MAJOR, SANE_CURRENT_MINOR, 0);
+  }
+  auth_callback = authorize;
+  free_devices();
+  load_config();
+  pthread_mutex_unlock(&iscanfly_lock);
+  return SANE_STATUS_GOOD;
+}
+
+void sane_iscanfly_exit(void) {
+  pthread_mutex_lock(&iscanfly_lock);
+  free_devices();
+  pthread_mutex_unlock(&iscanfly_lock);
 }
 
 SANE_Status sane_iscanfly_get_devices(const SANE_Device ***dev_list,
@@ -584,6 +603,8 @@ void sane_iscanfly_close(SANE_Handle handle) {
     sane_iscanfly_cancel(handle);
   }
 
+  /* Wait for any active scan on this handle to finish before freeing memory */
+  pthread_mutex_lock(&iscanfly_lock);
   if (h->jpeg_buf) {
     free(h->jpeg_buf);
     h->jpeg_buf = NULL;
@@ -594,6 +615,28 @@ void sane_iscanfly_close(SANE_Handle handle) {
   }
 
   free(h);
+  pthread_mutex_unlock(&iscanfly_lock);
+}
+
+/* Query scanner status with caching and active-scan collision avoidance */
+static const char *query_cached_status(IScanFly_Handle *h) {
+  if (scan_in_progress || h->scanning) {
+    return S400W_SCAN_READY;
+  }
+  if (pthread_mutex_trylock(&iscanfly_lock) != 0) {
+    return S400W_SCAN_READY;
+  }
+  time_t now = time(NULL);
+  if (last_status_val != NULL && (now - last_status_time) < 2) {
+    const char *cached = last_status_val;
+    pthread_mutex_unlock(&iscanfly_lock);
+    return cached;
+  }
+  const char *st = s400w_get_status(&h->s400w);
+  last_status_val = st;
+  last_status_time = time(NULL);
+  pthread_mutex_unlock(&iscanfly_lock);
+  return st;
 }
 
 const SANE_Option_Descriptor *
@@ -634,14 +677,14 @@ SANE_Status sane_iscanfly_control_option(SANE_Handle handle, SANE_Int option,
       *(SANE_Word *)value = h->opt_val[option];
       break;
     case OPT_PAGE_LOADED: {
-      const char *st = s400w_get_status(&h->s400w);
+      const char *st = query_cached_status(h);
       h->opt_val[OPT_PAGE_LOADED] =
           (st == S400W_SCAN_READY) ? SANE_TRUE : SANE_FALSE;
       *(SANE_Word *)value = h->opt_val[OPT_PAGE_LOADED];
       break;
     }
     case OPT_BATTERY_LOW: {
-      const char *st = s400w_get_status(&h->s400w);
+      const char *st = query_cached_status(h);
       h->opt_val[OPT_BATTERY_LOW] =
           (st == S400W_BATTERY_LOW) ? SANE_TRUE : SANE_FALSE;
       *(SANE_Word *)value = h->opt_val[OPT_BATTERY_LOW];
@@ -721,7 +764,12 @@ SANE_Status sane_iscanfly_control_option(SANE_Handle handle, SANE_Int option,
       break;
     }
     case OPT_CALIBRATE: {
+      if (scan_in_progress || h->scanning)
+        return SANE_STATUS_DEVICE_BUSY;
+      pthread_mutex_lock(&iscanfly_lock);
       const char *res = s400w_calibrate(&h->s400w);
+      last_status_time = 0;
+      pthread_mutex_unlock(&iscanfly_lock);
       if (res == S400W_NO_PAPER)
         return SANE_STATUS_NO_DOCS;
       if (res != S400W_CALIBRATE_END)
@@ -729,7 +777,12 @@ SANE_Status sane_iscanfly_control_option(SANE_Handle handle, SANE_Int option,
       break;
     }
     case OPT_CLEAN: {
+      if (scan_in_progress || h->scanning)
+        return SANE_STATUS_DEVICE_BUSY;
+      pthread_mutex_lock(&iscanfly_lock);
       const char *res = s400w_clean(&h->s400w);
+      last_status_time = 0;
+      pthread_mutex_unlock(&iscanfly_lock);
       if (res == S400W_NO_PAPER)
         return SANE_STATUS_NO_DOCS;
       if (res != S400W_CLEAN_END)
@@ -1335,8 +1388,15 @@ SANE_Status sane_iscanfly_start(SANE_Handle handle) {
   if (!h)
     return SANE_STATUS_INVAL;
 
-  if (h->scanning)
+  if (h->scanning || scan_in_progress)
     return SANE_STATUS_DEVICE_BUSY;
+
+  pthread_mutex_lock(&iscanfly_lock);
+  if (h->scanning || scan_in_progress) {
+    pthread_mutex_unlock(&iscanfly_lock);
+    return SANE_STATUS_DEVICE_BUSY;
+  }
+  scan_in_progress = 1;
   h->cancelled = SANE_FALSE;
 
   int timeout_sec = h->opt_val[OPT_PAPER_TIMEOUT];
@@ -1345,6 +1405,8 @@ SANE_Status sane_iscanfly_start(SANE_Handle handle) {
 
   while (1) {
     st = s400w_get_status(&h->s400w);
+    last_status_val = st;
+    last_status_time = time(NULL);
     if (st == S400W_SCAN_READY) {
       break;
     } else if (st == S400W_BATTERY_LOW) {
@@ -1352,16 +1414,25 @@ SANE_Status sane_iscanfly_start(SANE_Handle handle) {
     }
 
     if (timeout_sec <= 0 || elapsed >= timeout_sec) {
+      scan_in_progress = 0;
+      pthread_mutex_unlock(&iscanfly_lock);
       return (st == S400W_NO_PAPER) ? SANE_STATUS_NO_DOCS
                                     : SANE_STATUS_IO_ERROR;
     }
 
-    if (h->cancelled)
+    if (h->cancelled) {
+      scan_in_progress = 0;
+      pthread_mutex_unlock(&iscanfly_lock);
       return SANE_STATUS_CANCELLED;
+    }
 
     sleep(1);
     elapsed++;
   }
+
+  /* Brief settle delay before opening scan socket so the scanner's embedded
+   * TCP stack finishes closing the status connection */
+  usleep(250000);
 
   int hw_dpi = 0;
   if (h->fw_version >= S400W_MIN_SET_RESOLUTION_FW) {
@@ -1374,21 +1445,30 @@ SANE_Status sane_iscanfly_start(SANE_Handle handle) {
 
   s400w_scan(&h->s400w, hw_dpi, NULL, active_jpeg_receiver);
   active_jpeg_ctx = NULL;
+  last_status_time = 0;
 
   if (h->cancelled) {
+    scan_in_progress = 0;
+    pthread_mutex_unlock(&iscanfly_lock);
     return SANE_STATUS_CANCELLED;
   }
 
   if (ctx.err != 0 || h->jpeg_size == 0) {
+    scan_in_progress = 0;
+    pthread_mutex_unlock(&iscanfly_lock);
     return SANE_STATUS_IO_ERROR;
   }
 
   SANE_Status dec_st = decode_and_process_jpeg(h);
   if (dec_st != SANE_STATUS_GOOD) {
+    scan_in_progress = 0;
+    pthread_mutex_unlock(&iscanfly_lock);
     return dec_st;
   }
 
   h->scanning = SANE_TRUE;
+  scan_in_progress = 0;
+  pthread_mutex_unlock(&iscanfly_lock);
   return SANE_STATUS_GOOD;
 }
 

@@ -333,9 +333,11 @@ const char *s400w_get_version(struct S400W *s400w) {
   if (fd > 0) {
     if (sendCommand(s400w, fd, GET_VERSION) > 0) {
       response = readResponse(s400w, fd, s400w->timeout.normal);
-      _log(s400w, S400W_LOG_DEBUG, "get_version(): %s", response);
+      _log(s400w, S400W_LOG_DEBUG, "get_version(): %s",
+           response ? response : "NULL");
     }
     closesocket(fd);
+    mssleep(100);
   }
   return response;
 }
@@ -346,9 +348,11 @@ const char *s400w_get_status(struct S400W *s400w) {
   if (fd > 0) {
     if (sendCommand(s400w, fd, GET_STATUS) > 0) {
       response = readResponse(s400w, fd, s400w->timeout.normal);
-      _log(s400w, S400W_LOG_DEBUG, "get_status(): %s", response);
+      _log(s400w, S400W_LOG_DEBUG, "get_status(): %s",
+           response ? response : "NULL");
     }
     closesocket(fd);
+    mssleep(100);
   }
   return response;
 }
@@ -360,13 +364,15 @@ int s400w_set_resolution(struct S400W *s400w, int dpi) {
     if (sendCommand(s400w, fd, dpi == 600 ? SET_DPI_HIGH : SET_DPI_STANDARD) >
         0) {
       const char *response = readResponse(s400w, fd, s400w->timeout.normal);
-      _log(s400w, S400W_LOG_DEBUG, "set_resolution(%d): %s", dpi, response);
-      result = dpi == 600 && response == S400W_DPI_HIGH ||
-                       dpi != 600 && response == S400W_DPI_STANDARD
+      _log(s400w, S400W_LOG_DEBUG, "set_resolution(%d): %s", dpi,
+           response ? response : "NULL");
+      result = (dpi == 600 && response == S400W_DPI_HIGH) ||
+                       (dpi != 600 && response == S400W_DPI_STANDARD)
                    ? 0
                    : -1;
     }
     closesocket(fd);
+    mssleep(100);
   }
   return result;
 }
@@ -377,19 +383,23 @@ const char *s400w_clean(struct S400W *s400w) {
   if (fd > 0) {
     if (sendCommand(s400w, fd, GET_STATUS) > 0) {
       response = readResponse(s400w, fd, s400w->timeout.normal);
-      _log(s400w, S400W_LOG_DEBUG, "clean.check: %s", response);
+      _log(s400w, S400W_LOG_DEBUG, "clean.check: %s",
+           response ? response : "NULL");
       if (response == S400W_SCAN_READY) {
         sendCommand(s400w, fd, START_CLEANING);
         mssleep(500);
         response = readResponse(s400w, fd, s400w->timeout.normal);
-        _log(s400w, S400W_LOG_DEBUG, "clean().go: %s", response);
+        _log(s400w, S400W_LOG_DEBUG, "clean().go: %s",
+             response ? response : "NULL");
         if (response == S400W_CLEAN_GO) {
           response = readResponse(s400w, fd, 40000);
-          _log(s400w, S400W_LOG_DEBUG, "clean().end: %s", response);
+          _log(s400w, S400W_LOG_DEBUG, "clean().end: %s",
+               response ? response : "NULL");
         }
       }
     }
     closesocket(fd);
+    mssleep(100);
   }
   return response;
 }
@@ -401,19 +411,23 @@ const char *s400w_calibrate(struct S400W *s400w) {
     if (sendCommand(s400w, fd, GET_STATUS) > 0) {
       mssleep(200);
       response = readResponse(s400w, fd, s400w->timeout.normal);
-      _log(s400w, S400W_LOG_DEBUG, "calibrate().check: %s", response);
+      _log(s400w, S400W_LOG_DEBUG, "calibrate().check: %s",
+           response ? response : "NULL");
       if (response == S400W_SCAN_READY) {
         sendCommand(s400w, fd, START_CALIBRATION);
         mssleep(500);
         response = readResponse(s400w, fd, s400w->timeout.normal);
-        _log(s400w, S400W_LOG_DEBUG, "calibrate().go: %s", response);
+        _log(s400w, S400W_LOG_DEBUG, "calibrate().go: %s",
+             response ? response : "NULL");
         if (response == S400W_CALIBRATE_GO) {
           response = readResponse(s400w, fd, 60000);
-          _log(s400w, S400W_LOG_DEBUG, "calibrate().end: %s", response);
+          _log(s400w, S400W_LOG_DEBUG, "calibrate().end: %s",
+               response ? response : "NULL");
         }
       }
     }
     closesocket(fd);
+    mssleep(100);
   }
   return response;
 }
@@ -432,7 +446,8 @@ const char *s400w_scan(struct S400W *s400w, int resolution,
 
     if (sendCommand(s400w, fd, GET_STATUS) > 0) {
       response = readResponse(s400w, fd, s400w->timeout.normal);
-      _log(s400w, S400W_LOG_DEBUG, "scan().check: %s", response);
+      _log(s400w, S400W_LOG_DEBUG, "scan().check: %s",
+           response ? response : "NULL");
       if (response != S400W_SCAN_READY)
         abort = 1;
     } else
@@ -444,9 +459,9 @@ const char *s400w_scan(struct S400W *s400w, int resolution,
           0) {
         response = readResponse(s400w, fd, s400w->timeout.normal);
         _log(s400w, S400W_LOG_DEBUG, "scan().dpi(%d): %s", resolution,
-             response);
-        abort = resolution == 600 && response == S400W_DPI_HIGH ||
-                        resolution != 600 && response == S400W_DPI_STANDARD
+             response ? response : "NULL");
+        abort = (resolution == 600 && response == S400W_DPI_HIGH) ||
+                        (resolution != 600 && response == S400W_DPI_STANDARD)
                     ? 0
                     : 1;
       } else
@@ -455,7 +470,8 @@ const char *s400w_scan(struct S400W *s400w, int resolution,
 
     if (!abort && sendCommand(s400w, fd, START_SCAN) > 0) {
       response = readResponse(s400w, fd, s400w->timeout.normal);
-      _log(s400w, S400W_LOG_DEBUG, "scan().go: %s", response);
+      _log(s400w, S400W_LOG_DEBUG, "scan().go: %s",
+           response ? response : "NULL");
       if (response != S400W_SCAN_GO)
         abort = 1;
     } else
@@ -580,9 +596,10 @@ const char *s400w_scan(struct S400W *s400w, int resolution,
             mssleep(500);
             do {
               /* Wait up to timeout.data for the first chunk; once streaming
-               * starts (total > 0), use a short 3s inter-chunk timeout so
-               * trailing padding or end-of-stream stalls don't block for 30s */
-              long chunk_timeout = (total > 0) ? 3000 : s400w->timeout.data;
+               * starts (total > 0), use an 8s inter-chunk timeout so 2.4 GHz
+               * Wi-Fi retransmissions or scanner buffer pauses don't abort
+               * prematurely while still avoiding a 30s hang */
+              long chunk_timeout = (total > 0) ? 8000 : s400w->timeout.data;
               if (total > 0 && !(checkStream(fd, chunk_timeout) & 1)) {
                 _log(s400w, S400W_LOG_WARN,
                      "scan().jpeg: stream idle after %d / %d bytes", total,
@@ -647,6 +664,7 @@ const char *s400w_scan(struct S400W *s400w, int resolution,
 
     free(buffer);
     closesocket(fd);
+    mssleep(100);
   }
   return response;
 }

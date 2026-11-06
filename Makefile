@@ -1,6 +1,6 @@
 CC ?= gcc
 CFLAGS ?= -Wall -Wextra -O2 -fPIC -I./include
-LDFLAGS ?= -shared -Wl,-soname,libsane-iscanfly.so.1 -ljpeg
+LDFLAGS ?= -shared -Wl,-soname,libsane-iscanfly.so.1 -ljpeg -lm -lpthread
 
 DIST_DIR ?= dist
 SANE_BACKEND_NAME = iscanfly

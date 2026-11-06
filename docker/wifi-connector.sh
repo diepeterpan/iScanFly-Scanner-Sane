@@ -177,19 +177,19 @@ EOF_DH
         dhclient -cf "$dhclient_conf" -1 -v "$IFACE" 2>&1 | while read -r line; do log "[dhclient] $line"; done || true
     fi
 
-    # Probe scanner at 192.168.18.33 to warm up ARP table
+    # Probe scanner at 192.168.18.33 to warm up ARP table without opening TCP port 23
     log "Verifying scanner connectivity (192.168.18.33)..."
-    python3 -c "
-import socket
-s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-s.settimeout(2)
-try:
-    s.connect(('192.168.18.33', 23))
-    print('[wifi-connector] Scanner port 23 reached successfully!')
-    s.close()
-except Exception as e:
-    print(f'[wifi-connector] Notice: initial probe to 192.168.18.33:23: {e}')
-" 2>&1 | while read -r line; do log "$line"; done || true
+    if command -v ping >/dev/null 2>&1; then
+        if ping -c 1 -W 2 192.168.18.33 >/dev/null 2>&1; then
+            log "Scanner 192.168.18.33 reached via ICMP!"
+        else
+            log "Notice: initial ICMP probe to 192.168.18.33 did not reply (warming ARP via UDP/route lookup)"
+        fi
+    elif timeout 2 bash -c "</dev/tcp/192.168.18.33/23" 2>/dev/null; then
+        log "Scanner port 23 reached successfully!"
+    else
+        log "Notice: initial probe to 192.168.18.33:23 did not connect (scanner may be waking up)"
+    fi
 }
 
 # 5. Continuous Monitor and Scan Loop (WIFI_SCAN_INTERVAL seconds)
