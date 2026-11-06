@@ -65,11 +65,6 @@ struct S400W {
   char buffer[16];
   /* Safety net for string routines. */
   char end;
-  /* Optional seconds to wait for paper insertion during s400w_scan() on the
-   * same socket connection (0 = fail immediately if no paper). */
-  int paper_wait_sec;
-  /* Optional pointer to caller cancellation flag. */
-  const volatile int *cancelled;
 };
 
 /** Response: Device busy */

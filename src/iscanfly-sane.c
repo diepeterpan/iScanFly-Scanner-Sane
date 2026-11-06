@@ -1370,38 +1370,54 @@ SANE_Status sane_iscanfly_start(SANE_Handle handle) {
   scan_in_progress = 1;
   h->cancelled = SANE_FALSE;
 
-  int hw_dpi = 0;
-  if (h->fw_version >= S400W_MIN_SET_RESOLUTION_FW) {
-    hw_dpi = (h->opt_val[OPT_RESOLUTION] == 600) ? 600 : 300;
+  int timeout_sec = h->opt_val[OPT_PAPER_TIMEOUT];
+  int elapsed = 0;
+  const char *st = NULL;
+
+  while (1) {
+    st = s400w_get_status(&h->s400w);
+    h->opt_val[OPT_BATTERY_LOW] =
+        (st == S400W_BATTERY_LOW) ? SANE_TRUE : SANE_FALSE;
+    if (st == S400W_SCAN_READY) {
+      break;
+    } else if (st == S400W_BATTERY_LOW) {
+      iscanfly_log(S400W_LOG_WARN, "Warning: battery low");
+    }
+
+    if (timeout_sec <= 0 || elapsed >= timeout_sec) {
+      scan_in_progress = 0;
+      pthread_mutex_unlock(&iscanfly_lock);
+      return (st == S400W_NO_PAPER) ? SANE_STATUS_NO_DOCS
+                                    : SANE_STATUS_IO_ERROR;
+    }
+
+    if (h->cancelled) {
+      scan_in_progress = 0;
+      pthread_mutex_unlock(&iscanfly_lock);
+      return SANE_STATUS_CANCELLED;
+    }
+
+    sleep(1);
+    elapsed++;
   }
 
-  /* Perform status polling and scan over a single unified TCP connection inside
-   * s400w_scan() so we never open and close a separate status socket right
-   * before starting a scan */
-  h->s400w.paper_wait_sec = h->opt_val[OPT_PAPER_TIMEOUT];
-  h->s400w.cancelled = (const volatile int *)&h->cancelled;
+  int hw_dpi = (h->opt_val[OPT_RESOLUTION] == 600) ? 600 : 300;
+
+  if (h->fw_version >= S400W_MIN_SET_RESOLUTION_FW) {
+    s400w_set_resolution(&h->s400w, hw_dpi);
+  }
 
   JpegContext ctx = {h, 0};
   active_jpeg_ctx = &ctx;
   h->jpeg_size = 0;
 
-  const char *scan_res =
-      s400w_scan(&h->s400w, hw_dpi, NULL, active_jpeg_receiver);
+  s400w_scan(&h->s400w, hw_dpi, NULL, active_jpeg_receiver);
   active_jpeg_ctx = NULL;
-
-  h->opt_val[OPT_BATTERY_LOW] =
-      (scan_res == S400W_BATTERY_LOW) ? SANE_TRUE : SANE_FALSE;
 
   if (h->cancelled) {
     scan_in_progress = 0;
     pthread_mutex_unlock(&iscanfly_lock);
     return SANE_STATUS_CANCELLED;
-  }
-
-  if (scan_res == S400W_NO_PAPER) {
-    scan_in_progress = 0;
-    pthread_mutex_unlock(&iscanfly_lock);
-    return SANE_STATUS_NO_DOCS;
   }
 
   if (ctx.err != 0 || h->jpeg_size == 0) {
