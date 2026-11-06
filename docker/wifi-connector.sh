@@ -177,13 +177,10 @@ EOF_DH
         dhclient -cf "$dhclient_conf" -1 -v "$IFACE" 2>&1 | while read -r line; do log "[dhclient] $line"; done || true
     fi
 
-    # Verify scanner route/ARP entry without ever opening TCP port 23
-    # (opening and closing port 23 without sending a 4-byte S400W command wedges the scanner firmware!)
-    log "Verifying scanner route & ARP readiness (192.168.18.33)..."
-    if command -v ping >/dev/null 2>&1 && ping -c 1 -W 2 192.168.18.33 >/dev/null 2>&1; then
-        log "Scanner 192.168.18.33 reached via ICMP!"
-    elif ip neigh show 192.168.18.33 2>/dev/null | grep -q .; then
-        log "Scanner 192.168.18.33 present in ARP table ($(ip neigh show 192.168.18.33 | tr '\n' ' '))"
+    # Verify scanner route/ARP entry passively without sending ICMP or opening TCP port 23
+    # (dhclient's DHCPACK from 192.168.18.33 already verified connectivity and populated ARP)
+    if ip neigh show 192.168.18.33 2>/dev/null | grep -q .; then
+        log "Scanner 192.168.18.33 ready in ARP table ($(ip neigh show 192.168.18.33 | tr '\n' ' '))"
     else
         log "Route to 192.168.18.33 active on $IFACE"
     fi
