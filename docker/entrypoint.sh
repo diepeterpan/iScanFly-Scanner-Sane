@@ -12,13 +12,18 @@ airsane_listen_port="${AIRSANE_LISTEN_PORT:-8090}"
 announce_secure="${ANNOUNCE_SECURE:-false}"
 announce_base_url="${ANNOUNCE_BASE_URL:-}"
 scanner_ip="${SCANNER_IP:-192.168.18.33}"
+iscanfly_log_level="${ISCANFLY_LOG_LEVEL:-warn}"
+export ISCANFLY_LOG_LEVEL="$iscanfly_log_level"
 
 echo "=== Starting iScanFly AirSane (eSCL) Server ==="
 
 # 1. Update /etc/sane.d/iscanfly.conf if SCANNER_IP is set
 if [ -n "$scanner_ip" ]; then
-    echo "[entrypoint] Setting scanner address in /etc/sane.d/iscanfly.conf: $scanner_ip"
-    echo "$scanner_ip" > /etc/sane.d/iscanfly.conf
+    echo "[entrypoint] Setting scanner address in /etc/sane.d/iscanfly.conf: $scanner_ip (log_level: $iscanfly_log_level)"
+    {
+        echo "log_level $iscanfly_log_level"
+        echo "$scanner_ip"
+    } > /etc/sane.d/iscanfly.conf
 fi
 
 # 2. Start D-Bus system daemon
@@ -27,7 +32,6 @@ rm -f /run/dbus/pid /run/dbus/system_bus_socket
 dbus-daemon --system --fork
 
 # 3. Start Avahi daemon if mDNS announce is requested
-avahi_pid=
 if [ "$mdns_announce" = "true" ]; then
     echo "[entrypoint] Starting Avahi daemon for mDNS/Bonjour discovery..."
     mkdir -p /run/avahi-daemon

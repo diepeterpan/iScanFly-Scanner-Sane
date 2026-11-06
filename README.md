@@ -98,10 +98,18 @@ Edit `/etc/sane.d/iscanfly.conf` to set the IP address of your scanner on your W
 autocrop yes
 deskew yes
 
+# Log level: off, error, warn (default), info, debug, trace
+log_level warn
+
 # Scanner IP and optional port (default port: 23)
 192.168.18.33
 # Or with explicit port:
 # 192.168.18.33:23
+```
+
+You can also override the log level at runtime via the `ISCANFLY_LOG_LEVEL` environment variable (values: `off`/`silent`, `error`, `warn`, `info`, `debug`, `trace`, or numeric `0`–`5`):
+```bash
+ISCANFLY_LOG_LEVEL=debug scanimage -d iscanfly --format=jpeg > scan.jpg
 ```
 
 ---
@@ -222,6 +230,7 @@ services:
       - WIFI_VERBOSE=false                 # Set to true to log reconnects on every check interval
       # Scanner & AirSane Settings
       - SCANNER_IP=192.168.18.33          # IP address of the iScanFly scanner
+      - ISCANFLY_LOG_LEVEL=warn           # Driver log level: off, error, warn (default), info, debug, trace
       - MDNS_ANNOUNCE=true                # Announce via mDNS (Bonjour / Avahi)
       - AIRSANE_LISTEN_PORT=8090          # Port for AirSane Web & eSCL interface
       - AIRSANE_DEBUG=false               # Log AirSane internal security/debug events

@@ -38,7 +38,7 @@ echo "[1/4] Running ShellCheck on shell scripts..."
 SHELL_SCRIPTS=()
 while IFS= read -r f; do
     SHELL_SCRIPTS+=("$f")
-done < <(find "$REPO_ROOT/scripts" "$REPO_ROOT/tools" -name "*.sh")
+done < <(find "$REPO_ROOT/scripts" "$REPO_ROOT/tools" "$REPO_ROOT/docker" -name "*.sh")
 
 if shellcheck -x "${SHELL_SCRIPTS[@]}"; then
     echo "✓ ShellCheck passed cleanly."

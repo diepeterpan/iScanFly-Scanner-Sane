@@ -32,13 +32,23 @@ extern const char *S400W_LIB_VERSION;
 /** Firmware version necessary to set (higher) resolution. */
 extern const int S400W_MIN_SET_RESOLUTION_FW;
 
+/** Log levels for S400W message callback */
+enum S400W_LogLevel {
+  S400W_LOG_OFF = 0,
+  S400W_LOG_ERROR = 1,
+  S400W_LOG_WARN = 2,
+  S400W_LOG_INFO = 3,
+  S400W_LOG_DEBUG = 4,
+  S400W_LOG_TRACE = 5
+};
+
 /** S400W control object */
 struct S400W {
   /* Scanner's address */
   const char *hostname;
   int port;
-  /* Function to receive debug information, level is -1 = error, 0 = info, 1 =
-   * debug, 2 = verbose */
+  /* Function to receive log information, level is S400W_LogLevel
+   * (1 = error, 2 = warn, 3 = info, 4 = debug, 5 = trace) */
   void (*message)(int level, const char *message);
   /* Timeouts in milliseconds. */
   struct {

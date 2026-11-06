@@ -47,10 +47,45 @@ static const SANE_Device **sane_dev_list = NULL;
 static SANE_Auth_Callback auth_callback = NULL;
 static int default_autocrop = 1;
 static int default_deskew = 1;
+static int current_log_level = S400W_LOG_WARN;
+
+/* Parse log level string (named or numeric) */
+static int parse_log_level(const char *str) {
+  if (!str || *str == '\0')
+    return S400W_LOG_WARN;
+
+  while (*str == ' ' || *str == '\t' || *str == '=')
+    str++;
+
+  if (strcasecmp(str, "off") == 0 || strcasecmp(str, "silent") == 0 ||
+      strcasecmp(str, "none") == 0 || strcmp(str, "0") == 0) {
+    return S400W_LOG_OFF;
+  }
+  if (strcasecmp(str, "error") == 0 || strcasecmp(str, "err") == 0 ||
+      strcmp(str, "1") == 0) {
+    return S400W_LOG_ERROR;
+  }
+  if (strcasecmp(str, "warn") == 0 || strcasecmp(str, "warning") == 0 ||
+      strcmp(str, "2") == 0) {
+    return S400W_LOG_WARN;
+  }
+  if (strcasecmp(str, "info") == 0 || strcmp(str, "3") == 0) {
+    return S400W_LOG_INFO;
+  }
+  if (strcasecmp(str, "debug") == 0 || strcmp(str, "4") == 0) {
+    return S400W_LOG_DEBUG;
+  }
+  if (strcasecmp(str, "trace") == 0 || strcasecmp(str, "verbose") == 0 ||
+      strcmp(str, "5") == 0) {
+    return S400W_LOG_TRACE;
+  }
+  return S400W_LOG_WARN;
+}
 
 /* Logging helper */
 static void iscanfly_log(int level, const char *msg) {
-  (void)level;
+  if (current_log_level == S400W_LOG_OFF || level > current_log_level)
+    return;
   fprintf(stderr, "[iscanfly] %s\n", msg);
 }
 
@@ -64,7 +99,9 @@ static void iscanfly_jpeg_error_exit(j_common_ptr cinfo) {
   struct iscanfly_error_mgr *myerr = (struct iscanfly_error_mgr *)cinfo->err;
   char buffer[JMSG_LENGTH_MAX];
   (*cinfo->err->format_message)(cinfo, buffer);
-  fprintf(stderr, "[iscanfly] JPEG error: %s\n", buffer);
+  char msg[JMSG_LENGTH_MAX + 32];
+  snprintf(msg, sizeof(msg), "JPEG error: %s", buffer);
+  iscanfly_log(S400W_LOG_ERROR, msg);
   longjmp(myerr->setjmp_buffer, 1);
 }
 
@@ -129,6 +166,10 @@ static void load_config(void) {
 
   if (!fp) {
     /* Default fallback device if no conf file present */
+    const char *env_log = getenv("ISCANFLY_LOG_LEVEL");
+    if (env_log && *env_log != '\0') {
+      current_log_level = parse_log_level(env_log);
+    }
     IScanFly_Device *dev =
         (IScanFly_Device *)calloc(1, sizeof(IScanFly_Device));
     if (!dev)
@@ -186,6 +227,11 @@ static void load_config(void) {
       continue;
     }
 
+    if (strncasecmp(p, "log_level", 9) == 0) {
+      current_log_level = parse_log_level(p + 9);
+      continue;
+    }
+
     char host[200] = {0};
     int port = ISCANFLY_DEFAULT_PORT;
     char *colon = strchr(p, ':');
@@ -217,6 +263,11 @@ static void load_config(void) {
     num_devices++;
   }
   fclose(fp);
+
+  const char *env_log = getenv("ISCANFLY_LOG_LEVEL");
+  if (env_log && *env_log != '\0') {
+    current_log_level = parse_log_level(env_log);
+  }
 }
 
 SANE_Status sane_iscanfly_init(SANE_Int *version_code,
@@ -351,8 +402,8 @@ static void init_options(IScanFly_Handle *h) {
   h->opt_val[OPT_AUTOCROP] = default_autocrop ? SANE_TRUE : SANE_FALSE;
   h->opt[OPT_AUTOCROP].name = "autocrop";
   h->opt[OPT_AUTOCROP].title = SANE_I18N("Auto Crop");
-  h->opt[OPT_AUTOCROP].desc =
-      SANE_I18N("Automatically crop the scanned image to detected page boundary");
+  h->opt[OPT_AUTOCROP].desc = SANE_I18N(
+      "Automatically crop the scanned image to detected page boundary");
   h->opt[OPT_AUTOCROP].type = SANE_TYPE_BOOL;
   h->opt[OPT_AUTOCROP].unit = SANE_UNIT_NONE;
   h->opt[OPT_AUTOCROP].size = sizeof(SANE_Word);
@@ -722,10 +773,8 @@ static inline void sample_bilinear_rgb(const unsigned char *src, int width,
   const unsigned char *p11 = src + (y1 * width + x1) * 3;
 
   for (int c = 0; c < 3; c++) {
-    double val = (1.0 - dx) * (1.0 - dy) * p00[c] +
-                 dx * (1.0 - dy) * p10[c] +
-                 (1.0 - dx) * dy * p01[c] +
-                 dx * dy * p11[c];
+    double val = (1.0 - dx) * (1.0 - dy) * p00[c] + dx * (1.0 - dy) * p10[c] +
+                 (1.0 - dx) * dy * p01[c] + dx * dy * p11[c];
     if (val < 0.0)
       val = 0.0;
     if (val > 255.0)
@@ -740,8 +789,8 @@ static inline void sample_bilinear_rgb(const unsigned char *src, int width,
  * Straightens page if deskew is enabled, crops flush to detected edges.
  */
 static void process_autocrop_and_deskew(unsigned char **p_rgb, int *p_w,
-                                       int *p_h, int enable_crop,
-                                       int enable_deskew) {
+                                        int *p_h, int enable_crop,
+                                        int enable_deskew) {
   if (!enable_crop && !enable_deskew)
     return;
 
@@ -759,9 +808,12 @@ static void process_autocrop_and_deskew(unsigned char **p_rgb, int *p_w,
   int *edge_left = (int *)malloc(max_samples * sizeof(int));
   int *edge_right = (int *)malloc(max_samples * sizeof(int));
   if (!edge_y || !edge_left || !edge_right) {
-    if (edge_y) free(edge_y);
-    if (edge_left) free(edge_left);
-    if (edge_right) free(edge_right);
+    if (edge_y)
+      free(edge_y);
+    if (edge_left)
+      free(edge_left);
+    if (edge_right)
+      free(edge_right);
     return;
   }
 
@@ -771,7 +823,8 @@ static void process_autocrop_and_deskew(unsigned char **p_rgb, int *p_w,
     int right = -1;
     const unsigned char *row = src + y * w * 3;
     for (int x = 0; x < w; x++) {
-      int gray = (77 * row[x * 3] + 150 * row[x * 3 + 1] + 29 * row[x * 3 + 2]) >> 8;
+      int gray =
+          (77 * row[x * 3] + 150 * row[x * 3 + 1] + 29 * row[x * 3 + 2]) >> 8;
       if (gray > 140) {
         if (left == -1)
           left = x;
@@ -881,7 +934,8 @@ static void process_autocrop_and_deskew(unsigned char **p_rgb, int *p_w,
   *p_h = crop_h;
 }
 
-/* Decode JPEG buffer and process resolution scaling, autocrop, deskew, and bit depth conversion */
+/* Decode JPEG buffer and process resolution scaling, autocrop, deskew, and bit
+ * depth conversion */
 static SANE_Status decode_and_process_jpeg(IScanFly_Handle *h) {
   if (!h->jpeg_buf || h->jpeg_size == 0)
     return SANE_STATUS_IO_ERROR;
@@ -951,11 +1005,12 @@ static SANE_Status decode_and_process_jpeg(IScanFly_Handle *h) {
   jpeg_finish_decompress(&cinfo);
   jpeg_destroy_decompress(&cinfo);
 
-  /* Process Auto-Crop and Deskew on decoded RGB raster prior to thresholding/conversion */
+  /* Process Auto-Crop and Deskew on decoded RGB raster prior to
+   * thresholding/conversion */
   int enable_crop = (h->opt_val[OPT_AUTOCROP] == SANE_TRUE);
   int enable_deskew = (h->opt_val[OPT_DESKEW] == SANE_TRUE);
   process_autocrop_and_deskew(&rgb_buf, &width, &height, enable_crop,
-                             enable_deskew);
+                              enable_deskew);
 
   size_t out_bytes_per_line;
   if (is_color) {
@@ -1145,7 +1200,7 @@ SANE_Status sane_iscanfly_start(SANE_Handle handle) {
     if (st == S400W_SCAN_READY) {
       break;
     } else if (st == S400W_BATTERY_LOW) {
-      fprintf(stderr, "[iscanfly] Warning: battery low\n");
+      iscanfly_log(S400W_LOG_WARN, "Warning: battery low");
     }
 
     if (timeout_sec <= 0 || elapsed >= timeout_sec) {

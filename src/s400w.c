@@ -122,7 +122,8 @@ static int openSocket(struct S400W *s400w) {
 
   hp = gethostbyname(s400w->hostname);
   if (!hp) {
-    _log(s400w, -1, "openSocket(): Host not found: %s", s400w->hostname);
+    _log(s400w, S400W_LOG_ERROR, "openSocket(): Host not found: %s",
+         s400w->hostname);
     return -1;
   }
 
@@ -136,7 +137,7 @@ static int openSocket(struct S400W *s400w) {
   /* open a TCP/STREAM socket */
   fd = socket(sa.sin_family, SOCK_STREAM, 0);
   if (fd < 0) {
-    _log(s400w, -1, "openSocket(): socket() failed");
+    _log(s400w, S400W_LOG_ERROR, "openSocket(): socket() failed");
     return -1;
   }
 
@@ -149,14 +150,15 @@ static int openSocket(struct S400W *s400w) {
     }
     retries--;
     if (retries > 0) {
-      _log(s400w, 0, "openSocket(): connect to %s:%d failed, retrying in 1s...",
+      _log(s400w, S400W_LOG_WARN,
+           "openSocket(): connect to %s:%d failed, retrying in 1s...",
            inet_ntoa(sa.sin_addr), ntohs(sa.sin_port));
       mssleep(1000);
     }
   }
 
   if (retries == 0) {
-    _log(s400w, -1,
+    _log(s400w, S400W_LOG_ERROR,
          "openSocket(): connect(%s:%d) failed: scanner unreachable or sleeping",
          inet_ntoa(sa.sin_addr), ntohs(sa.sin_port));
     close(fd);
@@ -169,11 +171,12 @@ static int openSocket(struct S400W *s400w) {
 #else
   if (fcntl(fd, F_SETFL, O_NONBLOCK) == -1) {
 #endif
-    _log(s400w, -1, "openSocket(): couldn't set socket to nonblocking!");
+    _log(s400w, S400W_LOG_ERROR,
+         "openSocket(): couldn't set socket to nonblocking!");
     return -1;
   }
-  _log(s400w, 0, "openSocket(): connected to %s:%d", inet_ntoa(sa.sin_addr),
-       ntohs(sa.sin_port));
+  _log(s400w, S400W_LOG_INFO, "openSocket(): connected to %s:%d",
+       inet_ntoa(sa.sin_addr), ntohs(sa.sin_port));
   return fd;
 }
 
@@ -205,12 +208,14 @@ static int sendCommand(struct S400W *s400w, int fd, const char *command) {
   if (fd) {
     mssleep(200);
     sent = send(fd, command, 4, 0);
-    _log(s400w, 1, "sendCommand(%x): %d", *(unsigned int *)command, sent);
+    _log(s400w, S400W_LOG_DEBUG, "sendCommand(%x): %d",
+         *(unsigned int *)command, sent);
     if (sent > 0)
       mssleep(200);
   } else {
     sent = -1;
-    _log(s400w, -1, "sendCommand(%x): not connected", *(unsigned int *)command);
+    _log(s400w, S400W_LOG_ERROR, "sendCommand(%x): not connected",
+         *(unsigned int *)command);
   }
   return sent;
 }
@@ -222,7 +227,8 @@ static int recvResponse(struct S400W *s400w, int fd, char *buffer, int limit,
   if (fd >= 0) {
     if (checkStream(fd, timeout) & 1) {
       int read = recv(fd, buffer, limit, 0);
-      _log(s400w, 2, "recvResponse([%d], %d): ", limit, timeout, read);
+      _log(s400w, S400W_LOG_TRACE, "recvResponse([%d], %ld): %d bytes", limit,
+           timeout, read);
       /* closed socket */
       if (read == 0)
         read = -1;
@@ -234,10 +240,12 @@ static int recvResponse(struct S400W *s400w, int fd, char *buffer, int limit,
       }
       return read;
     }
-    _log(s400w, -1, "recvResponse([%d], %d): timeout", limit, timeout);
+    _log(s400w, S400W_LOG_ERROR, "recvResponse([%d], %ld): timeout", limit,
+         timeout);
     return 0;
   }
-  _log(s400w, -1, "recvResponse([%d], %d): not connected", limit, timeout);
+  _log(s400w, S400W_LOG_ERROR, "recvResponse([%d], %ld): not connected", limit,
+       timeout);
   return -1;
 }
 
@@ -261,7 +269,7 @@ static const char *detectResponse(const char *buffer, int length) {
  * receiving. */
 static const char *readResponse(struct S400W *s400w, int fd, long timeout) {
   memset(s400w->buffer, 0, sizeof(s400w->buffer));
-  _log(s400w, 1, "readResponse(%d)", timeout);
+  _log(s400w, S400W_LOG_DEBUG, "readResponse(%ld)", timeout);
   return detectResponse(
       s400w->buffer,
       recvResponse(s400w, fd, s400w->buffer, sizeof(s400w->buffer), timeout));
@@ -297,7 +305,7 @@ const char *s400w_get_version(struct S400W *s400w) {
   if (fd > 0) {
     if (sendCommand(s400w, fd, GET_VERSION) > 0) {
       response = readResponse(s400w, fd, s400w->timeout.normal);
-      _log(s400w, 1, "get_version(): %s", response);
+      _log(s400w, S400W_LOG_DEBUG, "get_version(): %s", response);
     }
     closesocket(fd);
   }
@@ -310,7 +318,7 @@ const char *s400w_get_status(struct S400W *s400w) {
   if (fd > 0) {
     if (sendCommand(s400w, fd, GET_STATUS) > 0) {
       response = readResponse(s400w, fd, s400w->timeout.normal);
-      _log(s400w, 1, "get_status(): %s", response);
+      _log(s400w, S400W_LOG_DEBUG, "get_status(): %s", response);
     }
     closesocket(fd);
   }
@@ -324,7 +332,7 @@ int s400w_set_resolution(struct S400W *s400w, int dpi) {
     if (sendCommand(s400w, fd, dpi == 600 ? SET_DPI_HIGH : SET_DPI_STANDARD) >
         0) {
       const char *response = readResponse(s400w, fd, s400w->timeout.normal);
-      _log(s400w, 1, "set_resolution(%d): %s", dpi, response);
+      _log(s400w, S400W_LOG_DEBUG, "set_resolution(%d): %s", dpi, response);
       result = dpi == 600 && response == S400W_DPI_HIGH ||
                        dpi != 600 && response == S400W_DPI_STANDARD
                    ? 0
@@ -341,15 +349,15 @@ const char *s400w_clean(struct S400W *s400w) {
   if (fd > 0) {
     if (sendCommand(s400w, fd, GET_STATUS) > 0) {
       response = readResponse(s400w, fd, s400w->timeout.normal);
-      _log(s400w, 1, "clean.check: %s", response);
+      _log(s400w, S400W_LOG_DEBUG, "clean.check: %s", response);
       if (response == S400W_SCAN_READY) {
         sendCommand(s400w, fd, START_CLEANING);
         mssleep(500);
         response = readResponse(s400w, fd, s400w->timeout.normal);
-        _log(s400w, 1, "clean().go: %s", response);
+        _log(s400w, S400W_LOG_DEBUG, "clean().go: %s", response);
         if (response == S400W_CLEAN_GO) {
           response = readResponse(s400w, fd, 40000);
-          _log(s400w, 1, "clean().end: %s", response);
+          _log(s400w, S400W_LOG_DEBUG, "clean().end: %s", response);
         }
       }
     }
@@ -365,15 +373,15 @@ const char *s400w_calibrate(struct S400W *s400w) {
     if (sendCommand(s400w, fd, GET_STATUS) > 0) {
       mssleep(200);
       response = readResponse(s400w, fd, s400w->timeout.normal);
-      _log(s400w, 1, "calibrate().check: %s", response);
+      _log(s400w, S400W_LOG_DEBUG, "calibrate().check: %s", response);
       if (response == S400W_SCAN_READY) {
         sendCommand(s400w, fd, START_CALIBRATION);
         mssleep(500);
         response = readResponse(s400w, fd, s400w->timeout.normal);
-        _log(s400w, 1, "calibrate().go: %s", response);
+        _log(s400w, S400W_LOG_DEBUG, "calibrate().go: %s", response);
         if (response == S400W_CALIBRATE_GO) {
           response = readResponse(s400w, fd, 60000);
-          _log(s400w, 1, "calibrate().end: %s", response);
+          _log(s400w, S400W_LOG_DEBUG, "calibrate().end: %s", response);
         }
       }
     }
@@ -396,7 +404,7 @@ const char *s400w_scan(struct S400W *s400w, int resolution,
 
     if (sendCommand(s400w, fd, GET_STATUS) > 0) {
       response = readResponse(s400w, fd, s400w->timeout.normal);
-      _log(s400w, 1, "scan().check: %s", response);
+      _log(s400w, S400W_LOG_DEBUG, "scan().check: %s", response);
       if (response != S400W_SCAN_READY)
         abort = 1;
     } else
@@ -407,7 +415,8 @@ const char *s400w_scan(struct S400W *s400w, int resolution,
                       resolution == 600 ? SET_DPI_HIGH : SET_DPI_STANDARD) >
           0) {
         response = readResponse(s400w, fd, s400w->timeout.normal);
-        _log(s400w, 1, "scan().dpi(%d): %s", resolution, response);
+        _log(s400w, S400W_LOG_DEBUG, "scan().dpi(%d): %s", resolution,
+             response);
         abort = resolution == 600 && response == S400W_DPI_HIGH ||
                         resolution != 600 && response == S400W_DPI_STANDARD
                     ? 0
@@ -418,7 +427,7 @@ const char *s400w_scan(struct S400W *s400w, int resolution,
 
     if (!abort && sendCommand(s400w, fd, START_SCAN) > 0) {
       response = readResponse(s400w, fd, s400w->timeout.normal);
-      _log(s400w, 1, "scan().go: %s", response);
+      _log(s400w, S400W_LOG_DEBUG, "scan().go: %s", response);
       if (response != S400W_SCAN_GO)
         abort = 1;
     } else
@@ -440,7 +449,7 @@ const char *s400w_scan(struct S400W *s400w, int resolution,
           memset(s400w->buffer, 0, sizeof(s400w->buffer));
           memcpy(s400w->buffer, partBuf, read);
           response = s400w->buffer;
-          _log(s400w, -1, "scan().preview: %s", response);
+          _log(s400w, S400W_LOG_ERROR, "scan().preview: %s", response);
         } else {
           int previewStatus = 0; /* = previewFunc(SEND_PREVIEW_DATA, 0, 0);*/
           /* this is a bit tricky. we need to carry over bytes in between
@@ -448,7 +457,7 @@ const char *s400w_scan(struct S400W *s400w, int resolution,
            * apart.*/
           while (read > 0) {
             total += read;
-            _log(s400w, 2, "scan().preview: %d (%d lines)", total,
+            _log(s400w, S400W_LOG_TRACE, "scan().preview: %d (%d lines)", total,
                  total / 1920);
             if (previewStatus == 0)
               previewStatus = previewFunc(partBuf, read);
@@ -481,7 +490,7 @@ const char *s400w_scan(struct S400W *s400w, int resolution,
         response = readResponse(s400w, fd,
                                 previewFunc ? s400w->timeout.jpeg_size
                                             : s400w->timeout.jpeg_only);
-        _log(s400w, 1, "scan().jpegsize: %s", response);
+        _log(s400w, S400W_LOG_DEBUG, "scan().jpegsize: %s", response);
         if (response == S400W_JPEG_SIZE) {
           int jslen = strlen(S400W_JPEG_SIZE);
           /* TODO: a bit lazy here, not checking if size read ==
@@ -490,7 +499,7 @@ const char *s400w_scan(struct S400W *s400w, int resolution,
                      0x0000FF00 & (s400w->buffer[jslen + 1] << 8) |
                      0x00FF0000 & (s400w->buffer[jslen + 2] << 16) |
                      0xFF000000 & (s400w->buffer[jslen + 3] << 24);
-          _log(s400w, 1, "scan().jpeg: %d bytes", size);
+          _log(s400w, S400W_LOG_INFO, "scan().jpeg: %d bytes", size);
 
           response = S400W_EOF;
           if (jpegFunc(S400W_JPEG_SIZE, size) == 0 &&
@@ -502,7 +511,8 @@ const char *s400w_scan(struct S400W *s400w, int resolution,
                                   s400w->timeout.data);
               if (read > 0) {
                 total += read;
-                _log(s400w, 2, "scan().jpeg: %d / %d bytes", total, size);
+                _log(s400w, S400W_LOG_TRACE, "scan().jpeg: %d / %d bytes",
+                     total, size);
                 if (jpegFunc(buffer, read) != 0)
                   break;
               }

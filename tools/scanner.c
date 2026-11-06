@@ -72,16 +72,19 @@ static int cleanup() {
 
 static void debug(int level, const char *message) {
   switch (level) {
-  case -1:
+  case S400W_LOG_ERROR:
     fprintf(stderr, "Error> s400w: %s\n", message);
     break;
-  case 0:
+  case S400W_LOG_WARN:
+    fprintf(stderr, "Warn > s400w: %s\n", message);
+    break;
+  case S400W_LOG_INFO:
     fprintf(stdout, "Info > s400w: %s\n", message);
     break;
-  case 1:
+  case S400W_LOG_DEBUG:
     fprintf(stdout, "Debug> s400w: %s\n", message);
     break;
-    /*case 2:  fprintf(stdout, "Debug: s400w: %s\n", message);*/
+    /*case S400W_LOG_TRACE: fprintf(stdout, "Trace> s400w: %s\n", message);*/
   }
 }
 

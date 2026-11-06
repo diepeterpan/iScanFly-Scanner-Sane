@@ -152,8 +152,6 @@ start_wpa_supplicant() {
 # 4. Start wpa_supplicant
 start_wpa_supplicant
 
-HAS_DHCP=0
-
 request_dhcp() {
     log "Associated with '$WIFI_SSID'. Requesting DHCP without default gateway..."
     ip -4 addr flush dev "$IFACE" 2>/dev/null || true
@@ -163,11 +161,9 @@ request_dhcp() {
         # -G / --nogateway prevents setting default route
         # -b / --background
         dhcpcd -G -b -p "$IFACE" 2>&1 | while read -r line; do log "[dhcpcd] $line"; done || true
-        HAS_DHCP=1
     elif command -v udhcpc >/dev/null 2>&1; then
         # udhcpc -O router request omitted, or custom script
         udhcpc -i "$IFACE" -n -q -O subnet -O broadcast 2>&1 | while read -r line; do log "[udhcpc] $line"; done || true
-        HAS_DHCP=1
     elif command -v dhclient >/dev/null 2>&1; then
         # For dhclient, create a temporary config that ignores routers
         local dhclient_conf="/run/dhclient-$IFACE.conf"
@@ -176,7 +172,6 @@ request subnet-mask, broadcast-address, time-offset, host-name;
 EOF_DH
         pkill -f "dhclient.*$IFACE" 2>/dev/null || true
         dhclient -cf "$dhclient_conf" -1 -v "$IFACE" 2>&1 | while read -r line; do log "[dhclient] $line"; done || true
-        HAS_DHCP=1
     fi
 
     # Probe scanner at 192.168.18.33 to warm up ARP table
@@ -241,7 +236,6 @@ while true; do
                 fi
             fi
         fi
-        HAS_DHCP=0
     fi
 
     sleep "$WIFI_SCAN_INTERVAL"
