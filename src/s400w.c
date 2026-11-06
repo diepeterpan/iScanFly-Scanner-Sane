@@ -151,6 +151,14 @@ static int openSocket(struct S400W *s400w) {
 #ifdef TCP_NODELAY
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, (const char *)&opt, sizeof(opt));
 #endif
+    /* Clamp TCP receive buffer before connect() so Linux advertises a small
+     * TCP Receive Window (RWIN <= 16 KB, Window Scaling disabled) on every
+     * scan. This prevents the S400W's minimal embedded lwIP stack from
+     * blasting huge bursts over 2.4 GHz Wi-Fi and deadlocking when a frame in
+     * a large window is lost. */
+    int rcvbuf = 16384;
+    setsockopt(fd, SOL_SOCKET, SO_RCVBUF, (const char *)&rcvbuf,
+               sizeof(rcvbuf));
 
     if (connect(fd, (struct sockaddr *)&sa, sizeof(sa)) == 0) {
       break;
@@ -619,19 +627,21 @@ const char *s400w_scan(struct S400W *s400w, int resolution,
         _log(s400w, S400W_LOG_INFO, "scan().jpeg: %d bytes", size);
 
         response = S400W_EOF;
+        int transfer_stalled = 0;
         for (int data_attempt = 0; data_attempt < 2; data_attempt++) {
           if (data_attempt > 0) {
             _log(s400w, S400W_LOG_WARN,
-                 "scan().jpeg: 0 bytes received, retrying SEND_JPEG_DATA "
+                 "scan().jpeg: incomplete transfer, retrying SEND_JPEG_DATA "
                  "(attempt %d)...",
                  data_attempt + 1);
             mssleep(500);
           }
           if (jpegFunc(S400W_JPEG_SIZE, size) == 0 &&
               sendCommand(s400w, fd, SEND_JPEG_DATA) > 0) {
-            int read = 0, total = 0;
+            int read = 0, total = 0, chunks = 0;
             unsigned char prev_byte = 0, last_byte = 0;
             int eoi_detected = 0;
+            transfer_stalled = 0;
             mssleep(500);
             do {
               /* Wait up to timeout.data for the first chunk; once streaming
@@ -641,13 +651,15 @@ const char *s400w_scan(struct S400W *s400w, int resolution,
               long chunk_timeout = (total > 0) ? 8000 : s400w->timeout.data;
               if (total > 0 && !(checkStream(fd, chunk_timeout) & 1)) {
                 _log(s400w, S400W_LOG_WARN,
-                     "scan().jpeg: stream idle after %d / %d bytes", total,
-                     size);
+                     "scan().jpeg: stream idle after %d / %d bytes (%d chunks)",
+                     total, size, chunks);
+                transfer_stalled = 1;
                 read = 0;
                 break;
               }
               read = recvResponse(s400w, fd, buffer, bufferSize, chunk_timeout);
               if (read > 0) {
+                chunks++;
                 if (read >= 2) {
                   prev_byte = (unsigned char)buffer[read - 2];
                   last_byte = (unsigned char)buffer[read - 1];
@@ -668,20 +680,28 @@ const char *s400w_scan(struct S400W *s400w, int resolution,
                     (total >= size || !(checkStream(fd, 150) & 1))) {
                   eoi_detected = 1;
                   _log(s400w, S400W_LOG_DEBUG,
-                       "scan().jpeg: EOI (FF D9) reached at %d / %d bytes",
-                       total, size);
+                       "scan().jpeg: EOI (FF D9) reached at %d / %d bytes "
+                       "(%d chunks)",
+                       total, size, chunks);
                   break;
                 }
               }
             } while (total < size && read > 0);
             if (total >= size || eoi_detected) {
+              _log(s400w, S400W_LOG_DEBUG,
+                   "scan().jpeg: transfer complete (%d / %d bytes, %d chunks)",
+                   total, size, chunks);
               response = S400W_SCAN_READY;
               abort = 0;
+              transfer_stalled = 0;
               break;
             }
-            if (total > 0) {
-              /* Preserve partial JPEG buffer so decode_and_process_jpeg() can
-               * apply scanline fault tolerance rather than wiping it */
+            /* If >= 95% of reported jpegsize arrived, only the last 1-2
+             * scanlines may be truncated; preserve buffer so
+             * decode_and_process_jpeg() can apply scanline fault tolerance.
+             * If < 95% arrived on attempt 1, allow retry of SEND_JPEG_DATA. */
+            if (total > 0 && ((long long)total * 100 >= (long long)size * 95 ||
+                              data_attempt == 1)) {
               response = S400W_SCAN_READY;
               abort = 0;
               break;
@@ -696,6 +716,13 @@ const char *s400w_scan(struct S400W *s400w, int resolution,
           } else {
             break;
           }
+        }
+        if (transfer_stalled) {
+          /* Send immediate TCP RST when closing a stalled stream so the
+           * scanner's single-threaded lwIP stack aborts its stuck send() loop
+           * immediately instead of blocking the next scan */
+          struct linger sl = {1, 0};
+          setsockopt(fd, SOL_SOCKET, SO_LINGER, (const char *)&sl, sizeof(sl));
         }
         jpegFunc(S400W_EOF, 0);
       }
