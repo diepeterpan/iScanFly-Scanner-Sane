@@ -110,11 +110,13 @@ max_bad_lines 2
 # 192.168.18.33:23
 ```
 
-You can also override the log level and scanline fault tolerance at runtime via environment variables:
+You can also override the default options, log level, and scanline fault tolerance at runtime via environment variables:
+- `ISCANFLY_AUTOCROP`: `true`/`yes`/`1` (default) or `false`/`no`/`0`.
+- `ISCANFLY_DESKEW`: `true`/`yes`/`1` (default) or `false`/`no`/`0`.
 - `ISCANFLY_LOG_LEVEL`: `off`/`silent`, `error`, `warn` (default), `info`, `debug`, `trace`, or numeric `0`–`5`.
 - `ISCANFLY_MAX_BAD_LINES`: maximum number of corrupted/halted scanlines to recover by duplicating the previous valid scanline before failing the scan (default `2`; `1`–`2` logs a warning, `>2` logs an error and aborts).
 ```bash
-ISCANFLY_LOG_LEVEL=debug ISCANFLY_MAX_BAD_LINES=2 scanimage -d iscanfly --format=jpeg > scan.jpg
+ISCANFLY_AUTOCROP=true ISCANFLY_DESKEW=true ISCANFLY_LOG_LEVEL=debug ISCANFLY_MAX_BAD_LINES=2 scanimage -d iscanfly --format=jpeg > scan.jpg
 ```
 
 ---
@@ -235,6 +237,8 @@ services:
       - WIFI_VERBOSE=false                 # Set to true to log reconnects on every check interval
       # Scanner & AirSane Settings
       - SCANNER_IP=192.168.18.33          # IP address of the iScanFly scanner
+      - ISCANFLY_AUTOCROP=true            # Automatically crop scanned images to page boundary (true/false)
+      - ISCANFLY_DESKEW=true              # Automatically straighten tilted documents (true/false)
       - ISCANFLY_LOG_LEVEL=warn           # Driver log level: off, error, warn (default), info, debug, trace
       - ISCANFLY_MAX_BAD_LINES=2          # Fault tolerance: 1-2 bad scanlines warn & recover; >2 fails
       - MDNS_ANNOUNCE=true                # Announce via mDNS (Bonjour / Avahi)

@@ -27,6 +27,8 @@ services:
       - WIFI_VERBOSE=false                  # Set to true to log reconnection attempts on every interval
       # Scanner & AirSane Configuration
       - SCANNER_IP=192.168.18.33
+      - ISCANFLY_AUTOCROP=true              # Automatically crop scanned images to page boundary (true/false)
+      - ISCANFLY_DESKEW=true                # Automatically straighten tilted documents (true/false)
       - ISCANFLY_LOG_LEVEL=warn             # Driver log level: off, error, warn (default), info, debug, trace
       - ISCANFLY_MAX_BAD_LINES=2            # Scanline fault tolerance: 1-2 bad scanlines warn & recover; >2 fails
       - MDNS_ANNOUNCE=true

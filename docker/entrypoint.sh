@@ -12,8 +12,12 @@ airsane_listen_port="${AIRSANE_LISTEN_PORT:-8090}"
 announce_secure="${ANNOUNCE_SECURE:-false}"
 announce_base_url="${ANNOUNCE_BASE_URL:-}"
 scanner_ip="${SCANNER_IP:-192.168.18.33}"
+iscanfly_autocrop="${ISCANFLY_AUTOCROP:-true}"
+iscanfly_deskew="${ISCANFLY_DESKEW:-true}"
 iscanfly_log_level="${ISCANFLY_LOG_LEVEL:-warn}"
 iscanfly_max_bad_lines="${ISCANFLY_MAX_BAD_LINES:-2}"
+export ISCANFLY_AUTOCROP="$iscanfly_autocrop"
+export ISCANFLY_DESKEW="$iscanfly_deskew"
 export ISCANFLY_LOG_LEVEL="$iscanfly_log_level"
 export ISCANFLY_MAX_BAD_LINES="$iscanfly_max_bad_lines"
 
@@ -21,8 +25,10 @@ echo "=== Starting iScanFly AirSane (eSCL) Server ==="
 
 # 1. Update /etc/sane.d/iscanfly.conf if SCANNER_IP is set
 if [ -n "$scanner_ip" ]; then
-    echo "[entrypoint] Setting scanner address in /etc/sane.d/iscanfly.conf: $scanner_ip (log_level: $iscanfly_log_level, max_bad_lines: $iscanfly_max_bad_lines)"
+    echo "[entrypoint] Setting scanner address in /etc/sane.d/iscanfly.conf: $scanner_ip (autocrop: $iscanfly_autocrop, deskew: $iscanfly_deskew, log_level: $iscanfly_log_level, max_bad_lines: $iscanfly_max_bad_lines)"
     {
+        echo "autocrop $iscanfly_autocrop"
+        echo "deskew $iscanfly_deskew"
         echo "log_level $iscanfly_log_level"
         echo "max_bad_lines $iscanfly_max_bad_lines"
         echo "$scanner_ip"

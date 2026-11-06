@@ -58,6 +58,25 @@ static int default_max_bad_lines = ISCANFLY_DEFAULT_MAX_BAD_LINES;
 static pthread_mutex_t iscanfly_lock = PTHREAD_MUTEX_INITIALIZER;
 static volatile int scan_in_progress = 0;
 
+/* Parse boolean string value ("yes"/"true"/"1" vs "no"/"false"/"0") */
+static int parse_bool_option(const char *str, int default_val) {
+  if (!str || *str == '\0')
+    return default_val;
+
+  while (*str == ' ' || *str == '\t' || *str == '=')
+    str++;
+
+  if (strcasecmp(str, "no") == 0 || strcasecmp(str, "false") == 0 ||
+      strcmp(str, "0") == 0 || strcasecmp(str, "off") == 0) {
+    return 0;
+  }
+  if (strcasecmp(str, "yes") == 0 || strcasecmp(str, "true") == 0 ||
+      strcmp(str, "1") == 0 || strcasecmp(str, "on") == 0) {
+    return 1;
+  }
+  return default_val;
+}
+
 /* Parse max_bad_lines integer value (>= 0) */
 static int parse_max_bad_lines(const char *str) {
   if (!str || *str == '\0')
@@ -211,6 +230,14 @@ static void load_config(void) {
 
   if (!fp) {
     /* Default fallback device if no conf file present */
+    const char *env_crop = getenv("ISCANFLY_AUTOCROP");
+    if (env_crop && *env_crop != '\0') {
+      default_autocrop = parse_bool_option(env_crop, default_autocrop);
+    }
+    const char *env_deskew = getenv("ISCANFLY_DESKEW");
+    if (env_deskew && *env_deskew != '\0') {
+      default_deskew = parse_bool_option(env_deskew, default_deskew);
+    }
     const char *env_log = getenv("ISCANFLY_LOG_LEVEL");
     if (env_log && *env_log != '\0') {
       current_log_level = parse_log_level(env_log);
@@ -251,28 +278,12 @@ static void load_config(void) {
     }
 
     if (strncasecmp(p, "autocrop", 8) == 0) {
-      char *val = p + 8;
-      while (*val == ' ' || *val == '\t' || *val == '=')
-        val++;
-      if (strcasecmp(val, "no") == 0 || strcasecmp(val, "false") == 0 ||
-          strcmp(val, "0") == 0) {
-        default_autocrop = 0;
-      } else {
-        default_autocrop = 1;
-      }
+      default_autocrop = parse_bool_option(p + 8, default_autocrop);
       continue;
     }
 
     if (strncasecmp(p, "deskew", 6) == 0) {
-      char *val = p + 6;
-      while (*val == ' ' || *val == '\t' || *val == '=')
-        val++;
-      if (strcasecmp(val, "no") == 0 || strcasecmp(val, "false") == 0 ||
-          strcmp(val, "0") == 0) {
-        default_deskew = 0;
-      } else {
-        default_deskew = 1;
-      }
+      default_deskew = parse_bool_option(p + 6, default_deskew);
       continue;
     }
 
@@ -318,6 +329,14 @@ static void load_config(void) {
   }
   fclose(fp);
 
+  const char *env_crop = getenv("ISCANFLY_AUTOCROP");
+  if (env_crop && *env_crop != '\0') {
+    default_autocrop = parse_bool_option(env_crop, default_autocrop);
+  }
+  const char *env_deskew = getenv("ISCANFLY_DESKEW");
+  if (env_deskew && *env_deskew != '\0') {
+    default_deskew = parse_bool_option(env_deskew, default_deskew);
+  }
   const char *env_log = getenv("ISCANFLY_LOG_LEVEL");
   if (env_log && *env_log != '\0') {
     current_log_level = parse_log_level(env_log);
