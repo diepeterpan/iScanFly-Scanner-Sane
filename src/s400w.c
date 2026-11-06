@@ -20,6 +20,7 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -134,20 +135,28 @@ static int openSocket(struct S400W *s400w) {
   sa.sin_port = htons(s400w->port);
   memcpy((void *)&sa.sin_addr, (void *)hp->h_addr_list[0], hp->h_length);
 
-  /* open a TCP/STREAM socket */
-  fd = socket(sa.sin_family, SOCK_STREAM, 0);
-  if (fd < 0) {
-    _log(s400w, S400W_LOG_ERROR, "openSocket(): socket() failed");
-    return -1;
-  }
-
   /* setup connection to the remote server with retry to handle scanner waking
    * from standby */
   int retries = 3;
+  fd = -1;
   while (retries > 0) {
+    fd = socket(sa.sin_family, SOCK_STREAM, 0);
+    if (fd < 0) {
+      _log(s400w, S400W_LOG_ERROR, "openSocket(): socket() failed");
+      return -1;
+    }
+
+    int opt = 1;
+    setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, (const char *)&opt, sizeof(opt));
+#ifdef TCP_NODELAY
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, (const char *)&opt, sizeof(opt));
+#endif
+
     if (connect(fd, (struct sockaddr *)&sa, sizeof(sa)) == 0) {
       break;
     }
+    closesocket(fd);
+    fd = -1;
     retries--;
     if (retries > 0) {
       _log(s400w, S400W_LOG_WARN,
@@ -157,11 +166,10 @@ static int openSocket(struct S400W *s400w) {
     }
   }
 
-  if (retries == 0) {
+  if (retries == 0 || fd < 0) {
     _log(s400w, S400W_LOG_ERROR,
          "openSocket(): connect(%s:%d) failed: scanner unreachable or sleeping",
          inet_ntoa(sa.sin_addr), ntohs(sa.sin_port));
-    close(fd);
     return -1;
   }
 
@@ -173,6 +181,7 @@ static int openSocket(struct S400W *s400w) {
 #endif
     _log(s400w, S400W_LOG_ERROR,
          "openSocket(): couldn't set socket to nonblocking!");
+    closesocket(fd);
     return -1;
   }
   _log(s400w, S400W_LOG_INFO, "openSocket(): connected to %s:%d",
@@ -187,15 +196,18 @@ static int checkStream(int fd, long timeout) {
   struct timeval tv;
   int ret;
 
-  FD_ZERO(&rfds);
-  FD_ZERO(&efds);
-  FD_SET(fd, &rfds);
-  FD_SET(fd, &efds);
+  do {
+    FD_ZERO(&rfds);
+    FD_ZERO(&efds);
+    FD_SET(fd, &rfds);
+    FD_SET(fd, &efds);
 
-  tv.tv_sec = timeout / 1000;
-  tv.tv_usec = timeout % 1000 * 1000;
+    tv.tv_sec = timeout / 1000;
+    tv.tv_usec = (timeout % 1000) * 1000;
 
-  ret = select(fd + 1, &rfds, NULL, &efds, timeout == -1 ? 0 : &tv);
+    ret = select(fd + 1, &rfds, NULL, &efds, timeout == -1 ? 0 : &tv);
+  } while (ret < 0 && errno == EINTR);
+
   return ret <= 0
              ? ret
              : (FD_ISSET(fd, &rfds) ? 1 : 0) | (FD_ISSET(fd, &efds) ? 2 : 0);
@@ -204,10 +216,23 @@ static int checkStream(int fd, long timeout) {
 /* Sends a 4 byte command to the scanner.
  * Returns number of bytes sent, -1 for error. */
 static int sendCommand(struct S400W *s400w, int fd, const char *command) {
-  int sent;
-  if (fd) {
+  int sent = 0;
+  if (fd >= 0) {
     mssleep(200);
-    sent = send(fd, command, 4, 0);
+    while (sent < 4) {
+      int n = send(fd, command + sent, 4 - sent, 0);
+      if (n < 0) {
+        if (errno == EINTR)
+          continue;
+        sent = -1;
+        break;
+      }
+      if (n == 0) {
+        sent = -1;
+        break;
+      }
+      sent += n;
+    }
     _log(s400w, S400W_LOG_DEBUG, "sendCommand(%x): %d",
          *(unsigned int *)command, sent);
     if (sent > 0)
@@ -226,7 +251,10 @@ static int recvResponse(struct S400W *s400w, int fd, char *buffer, int limit,
                         long timeout) {
   if (fd >= 0) {
     if (checkStream(fd, timeout) & 1) {
-      int read = recv(fd, buffer, limit, 0);
+      int read;
+      do {
+        read = recv(fd, buffer, limit, 0);
+      } while (read < 0 && errno == EINTR);
       _log(s400w, S400W_LOG_TRACE, "recvResponse([%d], %ld): %d bytes", limit,
            timeout, read);
       /* closed socket */
@@ -486,25 +514,67 @@ const char *s400w_scan(struct S400W *s400w, int resolution,
     if (!abort && jpegFunc) {
       if (previewFunc)
         mssleep(1000);
-      if (sendCommand(s400w, fd, GET_JPEG_SIZE) > 0) {
-        response = readResponse(s400w, fd,
-                                previewFunc ? s400w->timeout.jpeg_size
-                                            : s400w->timeout.jpeg_only);
-        _log(s400w, S400W_LOG_DEBUG, "scan().jpegsize: %s", response);
-        if (response == S400W_JPEG_SIZE) {
-          int jslen = strlen(S400W_JPEG_SIZE);
-          /* TODO: a bit lazy here, not checking if size read ==
-           * JPEG_SIZE.length + 4... */
-          int size = 0x000000FF & s400w->buffer[jslen] |
-                     0x0000FF00 & (s400w->buffer[jslen + 1] << 8) |
-                     0x00FF0000 & (s400w->buffer[jslen + 2] << 16) |
-                     0xFF000000 & (s400w->buffer[jslen + 3] << 24);
-          _log(s400w, S400W_LOG_INFO, "scan().jpeg: %d bytes", size);
 
-          response = S400W_EOF;
+      int jslen = (int)strlen(S400W_JPEG_SIZE);
+      int expected_hdr_len = jslen + 4;
+      int size = 0;
+
+      for (int js_attempt = 0; js_attempt < 2 && size <= 0; js_attempt++) {
+        if (js_attempt > 0) {
+          _log(s400w, S400W_LOG_WARN,
+               "scan().jpegsize: retrying GET_JPEG_SIZE (attempt %d)...",
+               js_attempt + 1);
+          mssleep(500);
+        }
+        if (sendCommand(s400w, fd, GET_JPEG_SIZE) > 0) {
+          memset(s400w->buffer, 0, sizeof(s400w->buffer));
+          long js_timeout =
+              previewFunc ? s400w->timeout.jpeg_size : s400w->timeout.jpeg_only;
+          int rlen = recvResponse(s400w, fd, s400w->buffer,
+                                  sizeof(s400w->buffer), js_timeout);
+          /* Ensure all 12 bytes ("jpegsize" + 4-byte size) are read if split
+           * across TCP segments */
+          while (rlen >= jslen && rlen < expected_hdr_len &&
+                 memcmp(s400w->buffer, S400W_JPEG_SIZE, jslen) == 0) {
+            int more =
+                recvResponse(s400w, fd, s400w->buffer + rlen,
+                             expected_hdr_len - rlen, s400w->timeout.normal);
+            if (more <= 0)
+              break;
+            rlen += more;
+          }
+          response = detectResponse(s400w->buffer, rlen);
+          _log(s400w, S400W_LOG_DEBUG, "scan().jpegsize: %s (read %d bytes)",
+               response ? response : "NULL", rlen);
+          if (response == S400W_JPEG_SIZE && rlen >= expected_hdr_len) {
+            size =
+                (0x000000FF & (unsigned char)s400w->buffer[jslen]) |
+                (0x0000FF00 &
+                 ((unsigned int)(unsigned char)s400w->buffer[jslen + 1] << 8)) |
+                (0x00FF0000 &
+                 ((unsigned int)(unsigned char)s400w->buffer[jslen + 2]
+                  << 16)) |
+                (0xFF000000 &
+                 ((unsigned int)(unsigned char)s400w->buffer[jslen + 3] << 24));
+          }
+        }
+      }
+
+      if (response == S400W_JPEG_SIZE && size > 0) {
+        _log(s400w, S400W_LOG_INFO, "scan().jpeg: %d bytes", size);
+
+        response = S400W_EOF;
+        for (int data_attempt = 0; data_attempt < 2; data_attempt++) {
+          if (data_attempt > 0) {
+            _log(s400w, S400W_LOG_WARN,
+                 "scan().jpeg: incomplete transfer, retrying SEND_JPEG_DATA "
+                 "(attempt %d)...",
+                 data_attempt + 1);
+            mssleep(500);
+          }
           if (jpegFunc(S400W_JPEG_SIZE, size) == 0 &&
               sendCommand(s400w, fd, SEND_JPEG_DATA) > 0) {
-            int read, total = 0;
+            int read = 0, total = 0;
             mssleep(500);
             do {
               read = recvResponse(s400w, fd, buffer, bufferSize,
@@ -517,20 +587,23 @@ const char *s400w_scan(struct S400W *s400w, int resolution,
                   break;
               }
             } while (total < size && read > 0);
+            if (total >= size) {
+              response = S400W_SCAN_READY;
+              abort = 0;
+              break;
+            }
             if (read < 0) {
               response = S400W_EOF;
               abort = 1;
-            }
-            if (read == 0) {
+            } else if (read == 0) {
               response = NULL;
               abort = 1;
             }
-            if (read > 0) {
-              response = S400W_SCAN_READY;
-            }
+          } else {
+            break;
           }
-          jpegFunc(S400W_EOF, 0);
         }
+        jpegFunc(S400W_EOF, 0);
       }
     }
 

@@ -13,15 +13,18 @@ announce_secure="${ANNOUNCE_SECURE:-false}"
 announce_base_url="${ANNOUNCE_BASE_URL:-}"
 scanner_ip="${SCANNER_IP:-192.168.18.33}"
 iscanfly_log_level="${ISCANFLY_LOG_LEVEL:-warn}"
+iscanfly_max_bad_lines="${ISCANFLY_MAX_BAD_LINES:-2}"
 export ISCANFLY_LOG_LEVEL="$iscanfly_log_level"
+export ISCANFLY_MAX_BAD_LINES="$iscanfly_max_bad_lines"
 
 echo "=== Starting iScanFly AirSane (eSCL) Server ==="
 
 # 1. Update /etc/sane.d/iscanfly.conf if SCANNER_IP is set
 if [ -n "$scanner_ip" ]; then
-    echo "[entrypoint] Setting scanner address in /etc/sane.d/iscanfly.conf: $scanner_ip (log_level: $iscanfly_log_level)"
+    echo "[entrypoint] Setting scanner address in /etc/sane.d/iscanfly.conf: $scanner_ip (log_level: $iscanfly_log_level, max_bad_lines: $iscanfly_max_bad_lines)"
     {
         echo "log_level $iscanfly_log_level"
+        echo "max_bad_lines $iscanfly_max_bad_lines"
         echo "$scanner_ip"
     } > /etc/sane.d/iscanfly.conf
 fi

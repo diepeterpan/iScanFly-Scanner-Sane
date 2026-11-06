@@ -48,6 +48,24 @@ static SANE_Auth_Callback auth_callback = NULL;
 static int default_autocrop = 1;
 static int default_deskew = 1;
 static int current_log_level = S400W_LOG_WARN;
+static int default_max_bad_lines = ISCANFLY_DEFAULT_MAX_BAD_LINES;
+
+/* Parse max_bad_lines integer value (>= 0) */
+static int parse_max_bad_lines(const char *str) {
+  if (!str || *str == '\0')
+    return ISCANFLY_DEFAULT_MAX_BAD_LINES;
+
+  while (*str == ' ' || *str == '\t' || *str == '=')
+    str++;
+
+  char *endptr = NULL;
+  long val = strtol(str, &endptr, 10);
+  if (endptr == str || val < 0)
+    return ISCANFLY_DEFAULT_MAX_BAD_LINES;
+  if (val > 10000)
+    val = 10000;
+  return (int)val;
+}
 
 /* Parse log level string (named or numeric) */
 static int parse_log_level(const char *str) {
@@ -89,10 +107,13 @@ static void iscanfly_log(int level, const char *msg) {
   fprintf(stderr, "[iscanfly] %s\n", msg);
 }
 
-/* Custom error manager for libjpeg to prevent exit() on corrupt image */
+/* Custom error manager for libjpeg to prevent exit() on corrupt image
+ * and track scanline-level corruption for configurable fault tolerance */
 struct iscanfly_error_mgr {
   struct jpeg_error_mgr pub;
   jmp_buf setjmp_buffer;
+  int in_scanline_loop;
+  int corrupt_warnings;
 };
 
 static void iscanfly_jpeg_error_exit(j_common_ptr cinfo) {
@@ -101,8 +122,24 @@ static void iscanfly_jpeg_error_exit(j_common_ptr cinfo) {
   (*cinfo->err->format_message)(cinfo, buffer);
   char msg[JMSG_LENGTH_MAX + 32];
   snprintf(msg, sizeof(msg), "JPEG error: %s", buffer);
-  iscanfly_log(S400W_LOG_ERROR, msg);
+  iscanfly_log(myerr->in_scanline_loop ? S400W_LOG_WARN : S400W_LOG_ERROR, msg);
   longjmp(myerr->setjmp_buffer, 1);
+}
+
+static void iscanfly_jpeg_emit_message(j_common_ptr cinfo, int msg_level) {
+  struct iscanfly_error_mgr *myerr = (struct iscanfly_error_mgr *)cinfo->err;
+  if (msg_level < 0) {
+    /* Corrupt data warning (e.g., premature end of data segment / bad Huffman
+     * code) */
+    if (myerr->corrupt_warnings == 0) {
+      char buffer[JMSG_LENGTH_MAX];
+      (*cinfo->err->format_message)(cinfo, buffer);
+      char msg[JMSG_LENGTH_MAX + 32];
+      snprintf(msg, sizeof(msg), "JPEG data notice: %s", buffer);
+      iscanfly_log(S400W_LOG_DEBUG, msg);
+    }
+    myerr->corrupt_warnings++;
+  }
 }
 
 /* JPEG receiver context struct */
@@ -170,6 +207,10 @@ static void load_config(void) {
     if (env_log && *env_log != '\0') {
       current_log_level = parse_log_level(env_log);
     }
+    const char *env_bad = getenv("ISCANFLY_MAX_BAD_LINES");
+    if (env_bad && *env_bad != '\0') {
+      default_max_bad_lines = parse_max_bad_lines(env_bad);
+    }
     IScanFly_Device *dev =
         (IScanFly_Device *)calloc(1, sizeof(IScanFly_Device));
     if (!dev)
@@ -232,6 +273,11 @@ static void load_config(void) {
       continue;
     }
 
+    if (strncasecmp(p, "max_bad_lines", 13) == 0) {
+      default_max_bad_lines = parse_max_bad_lines(p + 13);
+      continue;
+    }
+
     char host[200] = {0};
     int port = ISCANFLY_DEFAULT_PORT;
     char *colon = strchr(p, ':');
@@ -267,6 +313,10 @@ static void load_config(void) {
   const char *env_log = getenv("ISCANFLY_LOG_LEVEL");
   if (env_log && *env_log != '\0') {
     current_log_level = parse_log_level(env_log);
+  }
+  const char *env_bad = getenv("ISCANFLY_MAX_BAD_LINES");
+  if (env_bad && *env_bad != '\0') {
+    default_max_bad_lines = parse_max_bad_lines(env_bad);
   }
 }
 
@@ -940,15 +990,55 @@ static SANE_Status decode_and_process_jpeg(IScanFly_Handle *h) {
   if (!h->jpeg_buf || h->jpeg_size == 0)
     return SANE_STATUS_IO_ERROR;
 
+  /* Allow runtime environment override on each scan */
+  const char *env_bad = getenv("ISCANFLY_MAX_BAD_LINES");
+  int max_bad_lines = (env_bad && *env_bad != '\0')
+                          ? parse_max_bad_lines(env_bad)
+                          : default_max_bad_lines;
+
   struct jpeg_decompress_struct cinfo;
   struct iscanfly_error_mgr jerr;
+  memset(&jerr, 0, sizeof(jerr));
 
   cinfo.err = jpeg_std_error(&jerr.pub);
   jerr.pub.error_exit = iscanfly_jpeg_error_exit;
+  jerr.pub.emit_message = iscanfly_jpeg_emit_message;
+
+  unsigned char *volatile rgb_buf = NULL;
+  JSAMPROW volatile row_buf = NULL;
+  volatile size_t line = 0;
+  volatile int bad_lines = 0;
+  volatile int width = 0;
+  volatile int height = 0;
 
   if (setjmp(jerr.setjmp_buffer)) {
+    if (!jerr.in_scanline_loop || !rgb_buf || width <= 0 || height <= 0) {
+      if (row_buf)
+        free(row_buf);
+      if (rgb_buf)
+        free(rgb_buf);
+      jpeg_destroy_decompress(&cinfo);
+      return SANE_STATUS_IO_ERROR;
+    }
+    /* Error occurred inside scanline decoding loop:
+     * all remaining scanlines from 'line' to 'height - 1' are halted/bad */
+    size_t remaining_lines = (size_t)height > line ? (size_t)height - line : 1;
+    bad_lines += (int)remaining_lines;
+    while (line < (size_t)height) {
+      if (line > 0) {
+        memcpy(rgb_buf + (line * (size_t)width * 3),
+               rgb_buf + ((line - 1) * (size_t)width * 3), (size_t)width * 3);
+      } else {
+        memset(rgb_buf, 255, (size_t)width * 3);
+      }
+      line++;
+    }
+    if (row_buf) {
+      free(row_buf);
+      row_buf = NULL;
+    }
     jpeg_destroy_decompress(&cinfo);
-    return SANE_STATUS_IO_ERROR;
+    goto scanlines_done;
   }
 
   jpeg_create_decompress(&cinfo);
@@ -972,45 +1062,104 @@ static SANE_Status decode_and_process_jpeg(IScanFly_Handle *h) {
   cinfo.out_color_space = JCS_RGB;
   jpeg_start_decompress(&cinfo);
 
-  int width = cinfo.output_width;
-  int height = cinfo.output_height;
-  int is_color = (strcmp(h->scan_mode, SANE_VALUE_SCAN_MODE_COLOR) == 0);
-  int is_lineart = (strcmp(h->scan_mode, SANE_VALUE_SCAN_MODE_LINEART) == 0);
-  int threshold = h->opt_val[OPT_THRESHOLD];
+  width = (int)cinfo.output_width;
+  height = (int)cinfo.output_height;
+  if (width <= 0 || height <= 0) {
+    jpeg_destroy_decompress(&cinfo);
+    return SANE_STATUS_IO_ERROR;
+  }
 
   /* Decode full image to RGB buffer */
-  unsigned char *rgb_buf = (unsigned char *)malloc((size_t)width * height * 3);
+  rgb_buf = (unsigned char *)malloc((size_t)width * (size_t)height * 3);
   if (!rgb_buf) {
     jpeg_finish_decompress(&cinfo);
     jpeg_destroy_decompress(&cinfo);
     return SANE_STATUS_NO_MEM;
   }
 
-  JSAMPROW row_pointer[1];
-  row_pointer[0] = (JSAMPROW)malloc(width * 3);
-  if (!row_pointer[0]) {
+  row_buf = (JSAMPROW)malloc((size_t)width * 3);
+  if (!row_buf) {
     free(rgb_buf);
     jpeg_finish_decompress(&cinfo);
     jpeg_destroy_decompress(&cinfo);
     return SANE_STATUS_NO_MEM;
   }
 
-  size_t line = 0;
-  while (cinfo.output_scanline < cinfo.output_height) {
-    jpeg_read_scanlines(&cinfo, row_pointer, 1);
-    memcpy(rgb_buf + (line * width * 3), row_pointer[0], width * 3);
-    line++;
+  jerr.in_scanline_loop = 1;
+  while (cinfo.output_scanline < cinfo.output_height && line < (size_t)height) {
+    int prev_warnings = jerr.corrupt_warnings;
+    JSAMPROW row_pointer[1];
+    row_pointer[0] = row_buf;
+    JDIMENSION nread = jpeg_read_scanlines(&cinfo, row_pointer, 1);
+    if (nread == 0 || jerr.corrupt_warnings > prev_warnings) {
+      /* Scanline halted or had corrupt Huffman data:
+       * If corrupt_warnings triggered during an 8-line MCU block refill,
+       * all remaining lines in the stream from this point on are affected. */
+      size_t remaining_lines =
+          (size_t)height > line ? (size_t)height - line : 1;
+      bad_lines += (int)remaining_lines;
+      while (line < (size_t)height) {
+        if (line > 0) {
+          memcpy(rgb_buf + (line * (size_t)width * 3),
+                 rgb_buf + ((line - 1) * (size_t)width * 3), (size_t)width * 3);
+        } else {
+          memset(rgb_buf + (line * (size_t)width * 3), 255, (size_t)width * 3);
+        }
+        line++;
+      }
+      break;
+    } else {
+      memcpy(rgb_buf + (line * (size_t)width * 3), row_buf, (size_t)width * 3);
+      line++;
+    }
   }
-  free(row_pointer[0]);
-  jpeg_finish_decompress(&cinfo);
+  jerr.in_scanline_loop = 0;
+
+  if (row_buf) {
+    free(row_buf);
+    row_buf = NULL;
+  }
+  if (bad_lines == 0 && cinfo.output_scanline == cinfo.output_height) {
+    jpeg_finish_decompress(&cinfo);
+  }
   jpeg_destroy_decompress(&cinfo);
+
+scanlines_done:;
+  int final_width = width;
+  int final_height = height;
+  unsigned char *final_rgb_buf = rgb_buf;
+
+  if (bad_lines > max_bad_lines) {
+    char err_msg[160];
+    snprintf(err_msg, sizeof(err_msg),
+             "Scan failed: %d scanline(s) corrupted/halted (exceeds fault "
+             "tolerance of %d)",
+             bad_lines, max_bad_lines);
+    iscanfly_log(S400W_LOG_ERROR, err_msg);
+    free(final_rgb_buf);
+    return SANE_STATUS_IO_ERROR;
+  } else if (bad_lines > 0) {
+    char warn_msg[160];
+    snprintf(warn_msg, sizeof(warn_msg),
+             "Warning: recovered %d corrupted/halted scanline(s) by "
+             "duplicating previous line (fault tolerance: %d)",
+             bad_lines, max_bad_lines);
+    iscanfly_log(S400W_LOG_WARN, warn_msg);
+  }
+
+  int is_color = (strcmp(h->scan_mode, SANE_VALUE_SCAN_MODE_COLOR) == 0);
+  int is_lineart = (strcmp(h->scan_mode, SANE_VALUE_SCAN_MODE_LINEART) == 0);
+  int threshold = h->opt_val[OPT_THRESHOLD];
 
   /* Process Auto-Crop and Deskew on decoded RGB raster prior to
    * thresholding/conversion */
   int enable_crop = (h->opt_val[OPT_AUTOCROP] == SANE_TRUE);
   int enable_deskew = (h->opt_val[OPT_DESKEW] == SANE_TRUE);
-  process_autocrop_and_deskew(&rgb_buf, &width, &height, enable_crop,
-                              enable_deskew);
+  process_autocrop_and_deskew(&final_rgb_buf, &final_width, &final_height,
+                              enable_crop, enable_deskew);
+  rgb_buf = final_rgb_buf;
+  width = final_width;
+  height = final_height;
 
   size_t out_bytes_per_line;
   if (is_color) {
@@ -1158,7 +1307,6 @@ static SANE_Status decode_and_process_jpeg(IScanFly_Handle *h) {
     }
     free(rgb_buf);
   }
-  jpeg_destroy_decompress(&cinfo);
 
   h->raster_size = total_raster_bytes;
   h->raster_offset = 0;
@@ -1215,10 +1363,9 @@ SANE_Status sane_iscanfly_start(SANE_Handle handle) {
     elapsed++;
   }
 
-  int hw_dpi = (h->opt_val[OPT_RESOLUTION] == 600) ? 600 : 300;
-
+  int hw_dpi = 0;
   if (h->fw_version >= S400W_MIN_SET_RESOLUTION_FW) {
-    s400w_set_resolution(&h->s400w, hw_dpi);
+    hw_dpi = (h->opt_val[OPT_RESOLUTION] == 600) ? 600 : 300;
   }
 
   JpegContext ctx = {h, 0};

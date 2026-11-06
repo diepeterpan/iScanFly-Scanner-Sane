@@ -28,6 +28,7 @@ services:
       # Scanner & AirSane Configuration
       - SCANNER_IP=192.168.18.33
       - ISCANFLY_LOG_LEVEL=warn             # Driver log level: off, error, warn (default), info, debug, trace
+      - ISCANFLY_MAX_BAD_LINES=2            # Scanline fault tolerance: 1-2 bad scanlines warn & recover; >2 fails
       - MDNS_ANNOUNCE=true
       - AIRSANE_DEBUG=false                 # Set to true for verbose airsaned security & debugging
       - AIRSANE_ACCESS_LOG=                 # Set to '-' to log HTTP access requests (e.g. /eSCL/ScannerStatus)

@@ -101,15 +101,20 @@ deskew yes
 # Log level: off, error, warn (default), info, debug, trace
 log_level warn
 
+# Scanline fault tolerance (default: 2; 1-2 bad scanlines warn & duplicate previous line, >2 fails)
+max_bad_lines 2
+
 # Scanner IP and optional port (default port: 23)
 192.168.18.33
 # Or with explicit port:
 # 192.168.18.33:23
 ```
 
-You can also override the log level at runtime via the `ISCANFLY_LOG_LEVEL` environment variable (values: `off`/`silent`, `error`, `warn`, `info`, `debug`, `trace`, or numeric `0`–`5`):
+You can also override the log level and scanline fault tolerance at runtime via environment variables:
+- `ISCANFLY_LOG_LEVEL`: `off`/`silent`, `error`, `warn` (default), `info`, `debug`, `trace`, or numeric `0`–`5`.
+- `ISCANFLY_MAX_BAD_LINES`: maximum number of corrupted/halted scanlines to recover by duplicating the previous valid scanline before failing the scan (default `2`; `1`–`2` logs a warning, `>2` logs an error and aborts).
 ```bash
-ISCANFLY_LOG_LEVEL=debug scanimage -d iscanfly --format=jpeg > scan.jpg
+ISCANFLY_LOG_LEVEL=debug ISCANFLY_MAX_BAD_LINES=2 scanimage -d iscanfly --format=jpeg > scan.jpg
 ```
 
 ---
@@ -231,6 +236,7 @@ services:
       # Scanner & AirSane Settings
       - SCANNER_IP=192.168.18.33          # IP address of the iScanFly scanner
       - ISCANFLY_LOG_LEVEL=warn           # Driver log level: off, error, warn (default), info, debug, trace
+      - ISCANFLY_MAX_BAD_LINES=2          # Fault tolerance: 1-2 bad scanlines warn & recover; >2 fails
       - MDNS_ANNOUNCE=true                # Announce via mDNS (Bonjour / Avahi)
       - AIRSANE_LISTEN_PORT=8090          # Port for AirSane Web & eSCL interface
       - AIRSANE_DEBUG=false               # Log AirSane internal security/debug events
